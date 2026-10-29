@@ -210,9 +210,10 @@ def tokenize(text: str) -> list[Token]:
         word = m.group()
         prev = tokens[-1] if tokens else None
         noun_before = prev is not None and (prev.kind in NOUN_END or prev.text in (")", "]"))
-        if kind == "op" and word == "-" and not noun_before and m.end() < len(text):
-            # -1 after an operator or at the start is a negative literal;
-            # a-1 is subtraction.
+        if kind == "op" and word == "-" and (not noun_before or spaced) and m.end() < len(text):
+            # -1 after an operator, at the start, or after a space is a
+            # negative literal (abs -3 is abs[-3], n -1 is n[-1]); a-1 and
+            # a - 1 are subtraction.
             n = TOKEN.match(text, m.end())
             if n and n.lastgroup == "num" and n.start() == m.end():
                 tokens.append(Token("num", "-" + n.group(), spaced=spaced))
@@ -523,6 +524,11 @@ class Statement:
             return exp.Coalesce(this=total, expressions=[exp.Literal.number(0)])
         if word == "first" and isinstance(arg, exp.GroupConcat):
             return arg
+        if word == "first" and lifted(arg):
+            # first f[enlist `abc]: the generator's constant over a list of one.
+            return arg.transform(
+                lambda n: n.this if isinstance(n, Enlisted) and is_literal(n.this) else n
+            )
         if (
             word == "first"
             and isinstance(arg, Enlisted)
@@ -1462,7 +1468,7 @@ def exec_query(node: exp.Select) -> exp.Select:
 
 
 def is_query(node: exp.Expr) -> bool:
-    return isinstance(node, (exp.Select, exp.Union))
+    return isinstance(node, (exp.Select, exp.Union, exp.Intersect, exp.Except))
 
 
 def conjunction(items: list[exp.Expr]) -> exp.Expr:
@@ -1591,6 +1597,19 @@ def select(parser, cols, keys, source, where, distinct) -> exp.Select:
 
 def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
+
+
+def is_literal(node: exp.Expr) -> bool:
+    return isinstance(node, (exp.Literal, Chars)) or (
+        isinstance(node, exp.Paren) and is_literal(node.this)
+    )
+
+
+def lifted(node: exp.Expr) -> bool:
+    """A constant written over lists of one: no column, and a literal enlisted."""
+    if node.find(exp.Column, exp.AggFunc, exp.Star, exp.Select):
+        return False
+    return any(is_literal(e.this) for e in node.find_all(Enlisted))
 
 
 class Sorted(exp.Expression):

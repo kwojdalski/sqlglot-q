@@ -114,6 +114,7 @@ TRUNC = {
     "QUARTER": "{?[null x;0Np;`timestamp$`date$3 xbar `month$x]}",
     "YEAR": "{`timestamp$`date$`month$12*(`year$x)-2000}",
     "WEEK": "{`timestamp$`week$x}",  # the Monday, as SQL
+    "DAY": "{`timestamp$`date$x}",  # 1D xbar of a date is not a day
 }
 # Text functions, each over the rows: symbols go through their strings.
 REPLACE = ("{`$ssr[;y;z] each string x}", "{ssr[;y;z] each x}")
@@ -121,16 +122,17 @@ SUBSTRING = ("{`$sublist[(y-1;z)] each string x}", "{sublist[(y-1;z)] each x}")
 SUBSTRING_FROM = ("{`$(y-1)_' string x}", "{(y-1)_' x}")
 REVERSE = ("{`$reverse each string x}", "{reverse each x}")
 RUNNING_SUM = "{?[0=sums not null x;x 0N;sums x]}"
-# maxs and mins start from an infinity (maxs 0N 5 is -0W 5): NULL until the
-# first value, as SQL's running MAX and MIN.
-RUNNING_MAX = "{?[0=sums not null x;x 0N;maxs x]}"
-RUNNING_MIN = "{?[0=sums not null x;x 0N;mins x]}"
+# Running and sliding MAX and MIN through ranks (iasc iasc x), which order
+# symbols too, where maxs and mmax raise 'type. A null ranks lowest, and for
+# MIN is set past every rank: an index past the end is a null again.
+RUNNING_MAX = "{x (iasc x) maxs iasc iasc x}"
+RUNNING_MIN = "{x (iasc x) mins @[iasc iasc x;where null x;:;0W]}"
 # Sliding frames with nulls: msum counts a null as 0 and mmin takes it as the
 # least; SQL skips nulls, and a frame of only nulls is NULL. (mavg skips them.)
 MOVING_NULLS = {
     "msum": "{?[0=x msum not null y;y 0N;x msum y]}",
-    "mmax": "{?[0=x msum not null y;y 0N;x mmax y]}",
-    "mmin": "{?[0=x msum not null y;y 0N;x mmin (max y)^y]}",
+    "mmax": "{y (iasc y) x mmax iasc iasc y}",
+    "mmin": "{y (iasc y) x mmin @[iasc iasc y;where null y;:;0W]}",
 }
 # SIGN(NULL) is NULL; q's signum of a null is -1, a null being below zero.
 SIGN = "{?[null x;0Ni;signum x]}"
@@ -205,8 +207,8 @@ FRAMES = {
     for name, agg in (
         ("sum", "{$[count w:x where not null x;sum w;x 0N]}"),
         ("avg", "avg"),
-        ("max", "{$[count w:x where not null x;max w;x 0N]}"),
-        ("min", "{$[count w:x where not null x;min w;x 0N]}"),
+        ("max", "{$[count w:x where not null x;last asc w;x 0N]}"),
+        ("min", "{$[count w:x where not null x;first asc w;x 0N]}"),
         ("count", "{sum not null x}"),
         ("count_star", "count"),
     )
@@ -219,6 +221,42 @@ TEXT = {
     exp.DataType.Type.NVARCHAR,
     exp.DataType.Type.NCHAR,
 }
+
+
+UNLIFTED = (
+    exp.Literal,
+    exp.Paren,
+    exp.Alias,
+    exp.Cast,
+    exp.Interval,
+    exp.Null,
+    exp.Boolean,
+    exp.Tuple,
+    exp.Array,
+)
+
+
+def constant(node: exp.Expr) -> bool:
+    """A value that is the same on every row: no column, aggregate or query."""
+    return not isinstance(node, exp.Literal) and not node.find(
+        exp.Column, exp.AggFunc, exp.Star, exp.Subquery, exp.Select, exp.Window
+    )
+
+
+def lifted(node: exp.Expr) -> bool:
+    """A text expression over constants only: UPPER('ab') || 'c'. Its string
+    literals are written as lists of one (literal_sql), and the value is the
+    first of the result."""
+    if isinstance(node, UNLIFTED) or not isinstance(node, (exp.Func, exp.Binary, exp.Unary)):
+        return False
+    if isinstance(node, (exp.Predicate, exp.Connector)) and not isinstance(node, exp.Like):
+        return False  # a comparison of atoms is an atom already
+    if node.find(exp.Column, exp.AggFunc, exp.Star, exp.Subquery, exp.Select, exp.Window):
+        return False
+    return any(
+        lit.is_string and not isinstance(lit.parent, (exp.Interval, exp.Cast))
+        for lit in node.find_all(exp.Literal)
+    )
 
 
 def atomic(node: exp.Expr) -> bool:
@@ -371,6 +409,20 @@ class QGenerator(Generator):
         handler = self._q_dispatch.get(type(expression))
         if handler is None:
             return self.refuse(f"{type(expression).__name__} has no q translation")
+        if not getattr(self, "_lifting", False) and lifted(expression):
+            # Text functions run over the rows: each string x of a symbol
+            # atom walks its characters. A constant one runs over a list of
+            # one, its literals enlisted, and first takes the value.
+            self._lifting, self._enlisted = True, False
+            try:
+                text = handler(self, expression)
+                enlisted = self._enlisted
+            finally:
+                self._lifting = False
+            if enlisted:
+                return f"(first {text})"
+            # Its literals were written as q strings, not through
+            # literal_sql: it runs on atoms as it is.
         return handler(self, expression)
 
     def refuse(self, message: str) -> str:
@@ -410,7 +462,11 @@ class QGenerator(Generator):
 
     def literal_sql(self, node: exp.Literal) -> str:
         if node.is_string:
-            return self.symbol(node.this) if self.symbols else self.chars(node.this)
+            text = self.symbol(node.this) if self.symbols else self.chars(node.this)
+            if getattr(self, "_lifting", False):
+                self._enlisted = True
+                return f"(enlist {text})"
+            return text
         return number(node.this)
 
     def null_sql(self, node: exp.Null) -> str:
@@ -790,7 +846,7 @@ class QGenerator(Generator):
         text = self.joined(flatten_dpipe(node))
         columns = []
         for part in flatten_dpipe(node):
-            if not isinstance(part, exp.Literal) and part not in columns:
+            if not isinstance(part, exp.Literal) and not constant(part) and part not in columns:
                 columns.append(part)
         if not columns:
             return text
@@ -816,6 +872,10 @@ class QGenerator(Generator):
         for part in parts:
             if isinstance(part, exp.Literal) and part.is_string:
                 pieces.append((self.chars(part.this), True))
+            elif constant(part) and not getattr(self, "_lifting", False):
+                # One value, as a literal is: joined to each row, not paired.
+                text = self.operand(part)
+                pieces.append((f"string {text}" if self.symbols else text, True))
             elif self.symbols:
                 pieces.append((f"string {self.operand(part)}", False))
             else:
@@ -945,6 +1005,15 @@ class QGenerator(Generator):
             return self.refuse("TIME_BUCKET is translated for widths that divide a day")
         return f"{self.sql(width)} xbar {self.sql(node.expression)}"
 
+    def datetrunc_sql(self, node: exp.DateTrunc) -> str:
+        # DATE_TRUNC of a DATE (sqlglot's DateTrunc): DuckDB's answer is the
+        # TIMESTAMP it gives a timestamp, so the same truncation.
+        unit = node.args.get("unit")
+        name = unit.name if isinstance(unit, exp.Expr) else str(unit)
+        return self.timestamptrunc_sql(
+            exp.TimestampTrunc(this=node.this.copy(), unit=exp.var(name.upper()))
+        )
+
     def timestamptrunc_sql(self, node: exp.TimestampTrunc) -> str:
         from sqlglot_q.temporal import UNITS, span_text
 
@@ -954,7 +1023,12 @@ class QGenerator(Generator):
             return f"{TRUNC[unit]} {self.operand(node.this)}"
         if unit not in UNITS or UNITS[unit] > UNITS["DAY"]:
             return self.refuse(f"DATE_TRUNC to {unit} has no q xbar")
-        return f"{span_text(UNITS[unit])} xbar {self.sql(node.this)}"
+        arg = node.this
+        if not (isinstance(arg, exp.Cast) and arg.to.this == exp.DataType.Type.TIMESTAMP):
+            # A timespan xbar of a date counts in days from 2000.01.01 as if
+            # they were nanoseconds: a timestamp first.
+            arg = exp.Cast(this=arg.copy(), to=exp.DataType.build("TIMESTAMP"))
+        return f"{span_text(UNITS[unit])} xbar {self.sql(arg)}"
 
     def case_sql(self, node: exp.Case) -> str:
         default = node.args.get("default")
@@ -1402,7 +1476,8 @@ def like_pattern(sql: str, escape: str | None = None) -> str:
             ch = next(chars, "")
             out.append(f"[{ch}]" if ch in "*?[]" else ch)
         elif ch == "%":
-            out.append("*")
+            if not (out and out[-1] == "*"):
+                out.append("*")  # q's like raises 'nyi on **; %% is one %
         elif ch == "_":
             out.append("?")
         elif ch in "*?[]":

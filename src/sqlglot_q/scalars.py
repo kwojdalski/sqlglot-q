@@ -26,6 +26,9 @@ DAYS = ("Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Fri
 ADD_MONTHS = "{m:y+`month$x;f:`date$m;`timestamp$(x-`date$x)+f+((-1+`date$m+1)-f)&(`dd$x)-1}"
 
 
+# The z-th part of x split on y (on each character when y is ''), from 1 or,
+# when negative, from the end; '' past either end.
+SPLIT = 'p:$[count y;y vs x;enlist each x];i:$[z<0;z+count p;z-1];$[i within 0,-1+count p;p i;""]'
 STRFTIME = (
     'c:"YmdHMSj"!({{string`year$x}};{{-2#"0",string`mm$x}};{{-2#"0",string`dd$x}};'
     '{{-2#"0",string`hh$x}};{{-2#"0",string`uu$x}};{{-2#"0",string`ss$x}};'
@@ -143,8 +146,8 @@ CALLS = [
     # SPLIT_PART: the part from 1, or from the end when negative; '' past it.
     Call(
         exp.SplitPart,
-        '{`${p:y vs x;i:$[z<0;z+count p;z-1];$[i within 0,-1+count p;p i;""]}[;y;z] each string x}',
-        '{{p:y vs x;i:$[z<0;z+count p;z-1];$[i within 0,-1+count p;p i;""]}[;y;z] each x}',
+        "{`${" + SPLIT + "}[;y;z] each string x}",
+        "{{" + SPLIT + "}[;y;z] each x}",
         keys=("this", "delimiter", "part_index"),
         chars=("delimiter",),
     ),

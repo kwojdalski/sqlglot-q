@@ -499,7 +499,12 @@ def grouped(
         else f"{gen.name(n)}:{gen.sql(e)}"
         for n, e in zip(key_names, key_exprs, strict=True)
     )
-    inner = f"0!select {', '.join(cols)} by {by} from {src}{where}"
+    if cols:
+        inner = f"0!select {', '.join(cols)} by {by} from {src}{where}"
+    else:
+        # Nothing computed per group: the distinct keys. select by g of a
+        # table with no column but g raises 'rank.
+        inner = f"select distinct {by} from {src}{where}"
     if not reorder and condition is None:
         return inner, names
     picked = "" if not reorder else " " + ", ".join(gen.name(n) for n in names)
@@ -518,6 +523,8 @@ def having_condition(
     def swap(n: exp.Expr) -> exp.Expr:
         if not isinstance(n, exp.AggFunc):
             return n
+        if n.find_ancestor(exp.Subquery, exp.Select) is not None:
+            return n  # a subquery's own aggregate, over its own rows
         for i, (name, expr) in enumerate(computed):
             if expr == n:
                 if name is None:

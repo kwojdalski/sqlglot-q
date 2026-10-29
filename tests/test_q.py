@@ -247,7 +247,8 @@ class TestTemporal(Validator):
         )
         self.validate(
             "SELECT DATE_TRUNC('hour', ts) AS h FROM t",
-            "select h:0D01:00:00.000000000 xbar ts from t",
+            # A timestamp first: a timespan xbar of a date is no hour.
+            "select h:0D01:00:00.000000000 xbar `timestamp$ts from t",
         )
         self.validate("SELECT FLOOR(a / 5) * 5 AS b FROM t", "select b:5 xbar a from t")
         # q counts buckets from 2000.01.01, DuckDB from 2000-01-03.
