@@ -57,6 +57,7 @@ QUERIES = [
     "SELECT a, ASCII(w) AS c, CONCAT(w, NULL, v) AS d FROM s",
     # q reads right to left: a three-part join is parenthesised on the left.
     "SELECT a, CONCAT(w, '-', v) AS c, w || '-' || v AS d FROM s",
+    "SELECT a, CHR(CAST(a + 64 AS INTEGER)) AS c FROM s WHERE REGEXP_MATCHES(w, 'b')",
 ]
 
 

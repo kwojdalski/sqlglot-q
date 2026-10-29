@@ -98,6 +98,10 @@ def walk(node: exp.Expr) -> exp.Expr:
                 when.set("true", faithful(when.args["true"]))
             continue
         if isinstance(value, exp.Expr):
+            if isinstance(node, (exp.LogicalAnd, exp.LogicalOr)):
+                # BOOL_AND(c) reads c where it is true and where it is known.
+                node.set(key, faithful(value, filter=True))
+                continue
             if isinstance(value, (exp.Where, exp.Having)):
                 value.set("this", faithful(value.this, filter=True))
                 continue

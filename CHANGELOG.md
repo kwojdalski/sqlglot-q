@@ -24,12 +24,34 @@ Fixed, where q answered something other than SQL with no error
   is `2000.01m`).
 - `CAST(2.5 AS INTEGER)` was 2: a literal `2.5` is a DECIMAL, which SQL
   casts half away from zero (a DOUBLE column is still cast half even).
+- Reading q: `select g from (`k xasc update k:e from t)` lost `e` and
+  ordered by an undefined column; it is now `ORDER BY e`.
 - In string mode, `CONCAT(w, '-', v)` and `w || '-' || v` raised `'length`:
   q read `w,\:"-",'v` right to left, joining `"-"` to `v` first.
 - `CONCAT(s, NULL)` raised `'length`; a NULL adds nothing to it. `s || NULL`
   is refused.
 
 Added, each checked in q 5 against DuckDB and round-tripped:
+
+- `ORDER BY` an expression the select does not have, as a hidden column of
+  a subquery that is sorted on and left out (and with `GROUP BY`, as an
+  item of the grouped subquery).
+- `FULL JOIN` on keys of one name: every match, and both sides' rows with
+  none (a NULL key matches nothing). The key is read as `USING`'s.
+- A scalar subquery correlated on one key (`(SELECT AVG(n) FROM t AS b
+  WHERE b.g = a.g)`), as its aggregate grouped by the key and LEFT JOINed:
+  NULL where no row matches, 0 for `COUNT`.
+- `INTERSECT ALL` and `EXCEPT ALL`, counting each row's copies.
+- `BOOL_AND` and `BOOL_OR`, skipping the rows where the condition is
+  unknown (their NULL over no known rows is q's `0b`).
+- `ROWS` frames that reach ahead or end before the current row (`1
+  PRECEDING AND 1 FOLLOWING`, `CURRENT ROW AND UNBOUNDED FOLLOWING`) for
+  `SUM`, `AVG`, `MIN`, `MAX` and `COUNT`.
+- `REGEXP_MATCHES`, `~` and plain-text `SIMILAR TO`, where the regex is
+  one `LIKE` can state (literal text, `.`, `.*`, `^`, `$`, escapes; the `i`
+  flag as `ILIKE`); `CHR`; `STRFTIME` with `%Y %m %d %H %M %S %j`.
+- Reading q: a plain `a inter b` (no `distinct`) is refused; it keeps the
+  first's copies, which is neither `INTERSECT` nor `INTERSECT ALL`.
 
 - `x > ANY (SELECT ...)` and `x > ALL (SELECT ...)` (and `>=`, `<`, `<=`)
   in `WHERE` and `HAVING`, as a comparison with the subquery's `MIN` or

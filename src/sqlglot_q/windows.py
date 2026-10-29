@@ -200,6 +200,11 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
         if frame in ("range", "rows"):
             run = "1+til count i" if star else f"sums not null {col}"
             return run, frame == "range", True
+        if isinstance(frame, tuple):
+            from sqlglot_q.generator import FRAMES
+
+            word = FRAMES["count_star" if star else "count"]
+            return f"{word}[{frame[1]};{frame[2]};{'i' if star else col}]", False, True
         width = frame
         return f"{width} mcount {'i' if star else col}", False, True
     if type(fn) in WHOLE:
@@ -219,6 +224,11 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
                 type(fn), RUNNING[type(fn)]
             )
             return f"{word} {arg}", frame == "range", True
+        if isinstance(frame, tuple):
+            from sqlglot_q.generator import FRAMES
+
+            word = FRAMES[WHOLE[type(fn)]]
+            return f"{word}[{frame[1]};{frame[2]};{arg}]", False, True
         from sqlglot_q.generator import MOVING_NULLS
 
         word = MOVING[type(fn)]
@@ -241,11 +251,28 @@ def frame_of(spec: exp.WindowSpec | None, has_order: bool):
     if end is None and start_side == "PRECEDING":
         end = "CURRENT ROW"  # ROWS UNBOUNDED PRECEDING, ROWS 2 PRECEDING
     if end != "CURRENT ROW":
-        raise Refused("a window frame is translated when it ends at the current row")
+        if kind != "ROWS":
+            raise Refused("a RANGE frame is translated when it ends at the current row")
+        # A frame reaching ahead, or ending before the current row: each
+        # row's slice, a and b rows off it.
+        return ("frame", offset(start, start_side), offset(end, end_side))
     if start == "UNBOUNDED" and start_side == "PRECEDING":
         if not has_order:
             return "whole"
         return "range" if kind == "RANGE" else "rows"
     if kind == "ROWS" and isinstance(start, exp.Literal) and start_side == "PRECEDING":
         return int(start.name) + 1
+    if kind == "ROWS" and (start == "CURRENT ROW" or start_side == "FOLLOWING"):
+        return ("frame", offset(start, start_side), 0)
     raise Refused("a window frame is translated as UNBOUNDED or n PRECEDING to the current row")
+
+
+def offset(bound, side: str) -> str:
+    """A frame bound as rows off the current one, in q: 0N for UNBOUNDED."""
+    if bound == "UNBOUNDED":
+        return "0N"
+    if bound == "CURRENT ROW":
+        return "0"
+    if not (isinstance(bound, exp.Literal) and bound.name.isdigit()):
+        raise Refused("a window frame is translated with literal bounds")
+    return f"-{bound.name}" if side == "PRECEDING" else bound.name

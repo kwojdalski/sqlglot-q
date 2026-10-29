@@ -179,3 +179,193 @@ def key_pair(cond: exp.Expr, left: set[str], right: str) -> bool:
         return False
     tables = {cond.this.table, cond.expression.table}
     return right in tables and len(tables) == 2 and bool(tables - {right} <= left)
+
+
+def regex_like(expression: exp.Expr) -> exp.Expr:
+    """A regular expression LIKE can state, as that LIKE: q has no regex
+    engine, and its like is LIKE's. REGEXP_MATCHES searches the text, and
+    SIMILAR TO and ~ (REGEXP_FULL_MATCH) match the whole of it. Anything
+    else is left, and refused."""
+    if not isinstance(expression, exp.Select):
+        return expression
+
+    def rewrite(node: exp.Expr) -> exp.Expr:
+        full = isinstance(node, (exp.SimilarTo, exp.RegexpFullMatch))
+        if not (full or isinstance(node, exp.RegexpLike)):
+            return node
+        pattern, flag = node.expression, node.args.get("flag")
+        if not (isinstance(pattern, exp.Literal) and pattern.is_string):
+            return node
+        if node.args.get("escape") or (flag is not None and flag.name != "i"):
+            return node
+        if isinstance(node, exp.SimilarTo) and any(c in pattern.this for c in "%_.*+?|()[]{}\\"):
+            # SIMILAR TO is a regex in DuckDB and LIKE's wildcards with regex
+            # repetition in Postgres, where . is itself: which this is is not
+            # known, so only a pattern of plain text is translated.
+            return node
+        like = like_of_regex(pattern.this, full)
+        if like is None:
+            return node
+        kind = exp.ILike if flag is not None else exp.Like
+        test = kind(this=node.this.copy(), expression=exp.Literal.string(like))
+        if "\\" in like:
+            return exp.Escape(this=test, expression=exp.Literal.string("\\"))
+        return test
+
+    return expression.transform(rewrite)
+
+
+def like_of_regex(regex: str, full: bool) -> str | None:
+    """The LIKE pattern matching what regex matches, or None: literal text,
+    . and .*, ^ and $, and escaped characters."""
+    start = full or regex.startswith("^")
+    end = full or (regex.endswith("$") and not regex.endswith("\\$"))
+    body = regex[1 if regex.startswith("^") else 0 :]
+    body = body[:-1] if regex.endswith("$") and not regex.endswith("\\$") else body
+    out, i = [], 0
+    while i < len(body):
+        ch = body[i]
+        if ch == "\\":
+            if i + 1 == len(body) or body[i + 1].isalnum():
+                return None  # \d, \w, \b: classes and anchors LIKE has no form for
+            ch, i = body[i + 1], i + 1
+            out.append("\\" + ch if ch in "%_\\" else ch)
+        elif body.startswith(".*", i):
+            out.append("%")
+            i += 1
+        elif ch == ".":
+            out.append("_")
+        elif ch in "*+?{}()[]|^$":
+            return None
+        elif ch in "%_":
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+        i += 1
+    text = "".join(out)
+    return ("" if start else "%") + text + ("" if end else "%")
+
+
+def order_by_expression(expression: exp.Expr) -> exp.Expr:
+    """ORDER BY an expression the select does not have, as a column of a
+    subquery that the outer select sorts on and leaves out:
+
+        SELECT g FROM t ORDER BY ABS(n)
+        SELECT g FROM (SELECT *, ABS(n) AS q_o0 FROM t) ORDER BY q_o0
+
+    and with GROUP BY, the expression is an item of the grouped subquery."""
+    if not isinstance(expression, exp.Select):
+        return expression
+    order = expression.args.get("order")
+    if order is None or expression.args.get("distinct") or expression.args.get("joins"):
+        return expression
+    items = expression.expressions
+    if any(i.find(exp.Window) for i in items) or not expression.args.get("from_"):
+        return expression
+    plain = [i.this if isinstance(i, exp.Alias) else i for i in items]
+    aliases = {i.alias for i in items if isinstance(i, exp.Alias)}
+
+    def wanted(term: exp.Expr) -> bool:
+        target = term.this
+        if isinstance(target, exp.Literal) or isinstance(target, exp.Column):
+            return False  # a position, a column or an alias
+        return target not in plain and not (
+            isinstance(target, exp.Identifier) and target.name in aliases
+        )
+
+    if not any(wanted(o) for o in order.expressions):
+        return expression
+    grouped = expression.args.get("group") is not None
+    if grouped and not all(isinstance(i, (exp.Alias, exp.Column)) for i in items):
+        return expression  # the outer select names each item
+    inner = expression.copy()
+    for key in ("order", "limit", "offset"):
+        inner.set(key, None)
+    hidden, terms = [], []
+    for term in order.expressions:
+        if wanted(term):
+            name = f"q_o{len(hidden)}"
+            hidden.append(exp.alias_(term.this.copy(), name))
+            term = term.copy()
+            term.set("this", exp.column(name))
+        terms.append(term.copy())
+    if grouped:
+        inner.set("expressions", [i.copy() for i in items] + hidden)
+        outer_items = [exp.column(i.alias_or_name) for i in items]
+    else:
+        inner.set("expressions", [exp.Star(), *hidden])
+
+        def unqualified(node: exp.Expr) -> exp.Expr:
+            if isinstance(node, exp.Column) and node.table:
+                return exp.column(node.name)
+            return node
+
+        outer_items = [i.copy().transform(unqualified) for i in items]
+    outer = exp.Select(expressions=outer_items).from_(exp.Subquery(this=inner), copy=False)
+    outer.set("order", exp.Order(expressions=terms))
+    for key in ("limit", "offset"):
+        if expression.args.get(key):
+            outer.set(key, expression.args[key].copy())
+    return outer
+
+
+def correlated_scalars(expression: exp.Expr) -> exp.Expr:
+    """A scalar subquery correlated on one key, as a grouped join: q
+    evaluates a subquery once, so the per-row value comes from joining the
+    subquery's aggregate by its key.
+
+        SELECT g, n FROM t AS a WHERE n > (SELECT AVG(n) FROM t AS b WHERE b.g = a.g)
+        SELECT g, n FROM t AS a LEFT JOIN
+          (SELECT b.g AS q_k0, AVG(n) AS q_c0 FROM t AS b GROUP BY b.g) AS q_s0
+          ON a.g = q_s0.q_k0 WHERE n > q_c0
+
+    No row for the key is NULL, as the subquery over no rows; COUNT's 0."""
+    if not isinstance(expression, exp.Select) or not expression.args.get("from_"):
+        return expression
+    from sqlglot_q.correlated import outer_columns, semi_join
+
+    expression = expression.copy()
+    joins = []
+    for sub in list(expression.find_all(exp.Subquery)):
+        if sub.find_ancestor(exp.Select) is not expression:
+            continue
+        if isinstance(sub.parent, (exp.From, exp.Join, exp.In, exp.Exists)):
+            continue
+        query = sub.this
+        if not isinstance(query, exp.Select) or not outer_columns(query):
+            continue
+        found = semi_join(query)
+        if found is None or len(query.expressions) != 1 or query.args.get("distinct"):
+            continue
+        outer, inner, rest = found
+        value = query.expressions[0]
+        value = value.this if isinstance(value, exp.Alias) else value
+        if not isinstance(value.find(exp.AggFunc), exp.AggFunc):
+            continue
+        bare = [c for c in value.find_all(exp.Column) if c.find_ancestor(exp.AggFunc) is None]
+        if bare:
+            continue  # a column outside the aggregate: one value per row
+        n = len(joins)
+        key, column, alias = f"q_k{n}", f"q_c{n}", f"q_s{n}"
+        grouped = exp.Select(
+            expressions=[exp.alias_(inner.copy(), key), exp.alias_(value.copy(), column)]
+        ).from_(query.args["from_"].this.copy(), copy=False)
+        if rest:
+            grouped.set("where", exp.Where(this=exp.and_(*(c.copy() for c in rest), copy=False)))
+        grouped.set("group", exp.Group(expressions=[inner.copy()]))
+        joins.append(
+            exp.Join(
+                this=exp.Subquery(
+                    this=grouped, alias=exp.TableAlias(this=exp.to_identifier(alias))
+                ),
+                side="LEFT",
+                on=exp.EQ(this=outer.copy(), expression=exp.column(key, table=alias)),
+            )
+        )
+        result = exp.column(column, table=alias)
+        if isinstance(value, exp.Count):
+            result = exp.Coalesce(this=result, expressions=[exp.Literal.number(0)])
+        sub.replace(result)
+    if joins:
+        expression.set("joins", [*(expression.args.get("joins") or []), *joins])
+    return expression

@@ -117,6 +117,45 @@ QUERIES = [
     "SPLIT_PART(s, 'b', 3) AS c FROM t",
     "SELECT ASCII(s) AS a FROM t",
     "SELECT g, n FROM t WHERE d < CURRENT_DATE AND CURRENT_TIMESTAMP > d",
+    # ORDER BY an expression: a hidden column of a subquery, sorted on.
+    "SELECT g, o FROM t ORDER BY ABS(n), g",
+    "SELECT g, n FROM t WHERE o > 1 ORDER BY n * -1 DESC LIMIT 3",
+    "SELECT g, n FROM t ORDER BY LENGTH(s) DESC, n NULLS FIRST",
+    "SELECT g, COUNT(*) AS c FROM t GROUP BY g ORDER BY SUM(n) DESC",
+    # FULL JOIN: every match, and both sides' unmatched rows.
+    "SELECT g, n, v FROM t FULL JOIN u USING (g)",
+    "SELECT g, n, v FROM t FULL OUTER JOIN u USING (g) WHERE v IS NULL OR n > 2",
+    "SELECT g, COUNT(n) AS c, SUM(v) AS s FROM t FULL JOIN u USING (g) GROUP BY g",
+    # A scalar subquery correlated on a key: the grouped subquery, joined.
+    "SELECT g, n FROM t AS a WHERE n > (SELECT AVG(n) FROM t AS b WHERE b.g = a.g)",
+    "SELECT g, n, (SELECT MAX(v) FROM u WHERE u.g = t.g) AS m FROM t",
+    "SELECT g, n, (SELECT COUNT(*) FROM u WHERE u.g = t.g) AS c FROM t",
+    "SELECT g, v FROM u WHERE v > (SELECT SUM(n) FROM t WHERE t.g = u.g AND t.o > 1)",
+    # INTERSECT ALL and EXCEPT ALL count the copies.
+    "SELECT g FROM t INTERSECT ALL SELECT g FROM u",
+    "SELECT g FROM t EXCEPT ALL SELECT g FROM u",
+    "SELECT g, o FROM t EXCEPT ALL SELECT g, v FROM u",
+    "SELECT g FROM t WHERE n > 0 INTERSECT ALL SELECT g FROM t WHERE o > 1",
+    # BOOL_AND and BOOL_OR skip the rows where the condition is unknown.
+    "SELECT g, BOOL_AND(n > 0) AS a, BOOL_OR(n > 4) AS o FROM t GROUP BY g",
+    "SELECT BOOL_AND(o > 0) AS a, BOOL_OR(x < 0) AS o FROM t",
+    "SELECT g FROM t GROUP BY g HAVING BOOL_AND(n > 0)",
+    # ROWS frames that reach ahead, or end before the current row.
+    "SELECT g, o, n, SUM(n) OVER (PARTITION BY g ORDER BY o, n "
+    "ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) AS r FROM t",
+    "SELECT g, o, AVG(x) OVER (ORDER BY o, g "
+    "ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS r FROM t",
+    "SELECT g, o, MAX(n) OVER (PARTITION BY g ORDER BY o, n "
+    "ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) AS r FROM t",
+    "SELECT g, o, MIN(n) OVER (ORDER BY o, g ROWS BETWEEN 1 FOLLOWING AND 3 FOLLOWING) AS r, "
+    "COUNT(*) OVER (ORDER BY o, g ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) AS c FROM t",
+    # Regular expressions LIKE can state; CHR and STRFTIME.
+    "SELECT g, s FROM t WHERE REGEXP_MATCHES(s, '^a') OR REGEXP_MATCHES(s, 'q$')",
+    "SELECT g, s FROM t WHERE REGEXP_MATCHES(s, 'a.x') OR REGEXP_MATCHES(s, 'B', 'i')",
+    "SELECT g, s FROM t WHERE s ~ '.b.' AND NOT REGEXP_MATCHES(s, '^.b')",
+    "SELECT g, REGEXP_MATCHES(s, 'z') AS m FROM t",
+    "SELECT CHR(CAST(o + 64 AS INTEGER)) AS c FROM t",
+    "SELECT STRFTIME(d, '%Y/%m-%d day %j') AS a, STRFTIME(d, '%H:%M:%S') AS b FROM t",
 ]
 
 
@@ -131,12 +170,14 @@ def test_q_returns_what_duckdb_returns(answers, sql):
     q, got = answers[sql]
     expected = run_duckdb(DATA, sql)
     assert not isinstance(got, str), f"q refused {q}: {got}"
-    assert same(got, expected, False), f"{q}\nq:      {got}\nduckdb: {expected}"
+    ordered = bool(sqlglot.parse_one(sql, read="duckdb").args.get("order"))
+    assert same(got, expected, ordered), f"{q}\nq:      {got}\nduckdb: {expected}"
 
 
 REFUSED = [
     # q evaluates a subquery once, as a table of its own: b.g = a.g is g=g.
-    "SELECT g, n FROM t AS a WHERE n > (SELECT AVG(n) FROM t AS b WHERE b.g = a.g)",
+    "SELECT g, n FROM t AS a WHERE n > (SELECT AVG(n) FROM t AS b WHERE b.g = a.g AND b.o = a.o)",
+    "SELECT g, (SELECT v FROM u WHERE u.g = t.g) AS m FROM t",
     "SELECT g, n FROM t WHERE g IN (SELECT g FROM u WHERE u.v > t.n)",
     "SELECT g FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.v > t.n)",
     # A joined q table has one column per name.
@@ -145,10 +186,14 @@ REFUSED = [
     # A LEFT JOIN's right key is NULL where nothing matches.
     "SELECT t.g, n, u.g AS h FROM t LEFT JOIN u ON t.g = u.g",
     "SELECT t.g, n, v FROM t RIGHT JOIN u ON t.g = u.g",
-    "SELECT g FROM t INTERSECT ALL SELECT g FROM u",
     "SELECT g, n FROM t WHERE NOT (n > ALL (SELECT v FROM u))",
     "SELECT s || NULL AS u FROM t",
-    "SELECT g, o FROM t ORDER BY ABS(n)",
+    "SELECT DISTINCT g, o FROM t ORDER BY ABS(n)",
+    "SELECT t.g, n, v FROM t FULL JOIN u ON t.g = u.g",
+    "SELECT a, w, v FROM t2 FULL JOIN u ON t2.a = u.v",
+    "SELECT g FROM t WHERE s SIMILAR TO 'a.*'",
+    "SELECT g FROM t WHERE REGEXP_MATCHES(s, 'a+b')",
+    "SELECT STRFTIME(d, '%A') AS w FROM t",
     "SELECT TRUNC(x, 1) FROM t",
     "SELECT LPAD(s, 5) FROM t",
 ]

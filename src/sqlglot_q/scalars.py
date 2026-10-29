@@ -26,6 +26,25 @@ DAYS = ("Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Fri
 ADD_MONTHS = "{m:y+`month$x;f:`date$m;`timestamp$(x-`date$x)+f+((-1+`date$m+1)-f)&(`dd$x)-1}"
 
 
+STRFTIME = (
+    'c:"YmdHMSj"!({{string`year$x}};{{-2#"0",string`mm$x}};{{-2#"0",string`dd$x}};'
+    '{{-2#"0",string`hh$x}};{{-2#"0",string`uu$x}};{{-2#"0",string`ss$x}};'
+    '{{-3#"00",string 1+(`date$x)-`date$`month$12*(`year$x)-2000}});p:"%" vs y;'
+    '{result}{{[c;p;x] $[null x;"";(first p),raze {{[c;x;s] (c[first s] x),1_s}}[c;x] each 1_p]}}'
+    "[c;p] each `timestamp$x"
+)
+
+
+def strftime_codes(fmt) -> str | None:
+    """Why the format has no q form, or None: %Y %m %d %H %M %S %j only."""
+    if not (isinstance(fmt, exp.Literal) and fmt.is_string):
+        return "STRFTIME is translated with a literal format"
+    parts = fmt.this.split("%")[1:]
+    if any(not p or p[0] not in "YmdHMSj" for p in parts):
+        return "STRFTIME is translated for %Y, %m, %d, %H, %M, %S and %j"
+    return None
+
+
 @dataclass(frozen=True)
 class Call:
     kind: type
@@ -35,6 +54,7 @@ class Call:
     chars: tuple[str, ...] = ()  # keys written as q strings
     fixed: dict = field(default_factory=dict)  # args the node must have
     aggregate: bool = False
+    check: object = None  # node -> why it has no q form, or None
 
     def lambdas(self) -> tuple[str, ...]:
         return (self.symbol,) if self.text is None else (self.symbol, self.text)
@@ -129,6 +149,22 @@ CALLS = [
         "{?[null x;0N;{$[count x;`long$first x;0]} each string x]}",
         "{{$[count x;`long$first x;0N]} each x}",
     ),
+    # STRFTIME: the format read at run time, each %X replaced by its part.
+    Call(
+        exp.TimeToStr,
+        "{" + STRFTIME.format(result="`$") + "}",
+        "{" + STRFTIME.format(result="") + "}",
+        keys=("this", "format"),
+        chars=("format",),
+        check=lambda node: strftime_codes(node.args["format"]),
+    ),
+    # CHR: the character of a code point.
+    Call(
+        exp.Chr,
+        '{`${$[null x;"";enlist "c"$x]} each x}',
+        '{{$[null x;"";enlist "c"$x]} each x}',
+        keys=("expressions",),
+    ),
     # Aggregates, each over the non-null values and NULL over none.
     Call(
         exp.ArgMax,
@@ -200,10 +236,17 @@ def find(node: exp.Expr) -> Call | None:
 
 
 def write(gen, node: exp.Expr, call: Call) -> str:
+    if call.check is not None and (why := call.check(node)):
+        return gen.refuse(why)
     fn = call.symbol if gen.symbols or call.text is None else call.text
     args = []
     for key in call.keys:
         arg = node.args[key]
+        if isinstance(arg, list):
+            # CHR(n): one argument, held as a list.
+            if len(arg) != 1:
+                return gen.refuse(f"{node.key.upper()} is translated with one argument")
+            arg = arg[0]
         if key in call.chars:
             if not (isinstance(arg, exp.Literal) and arg.is_string):
                 return gen.refuse(f"{node.key.upper()} is translated with literal text")
@@ -218,6 +261,8 @@ def read(call: Call, args: list[exp.Expr]) -> exp.Expr | None:
     if len(args) != len(call.keys):
         return None
     values = dict(zip(call.keys, args, strict=True))
+    if "expressions" in values:
+        values["expressions"] = [values["expressions"]]
     for key, value in call.fixed.items():
         if value is not None:
             values[key] = exp.var(value) if key == "unit" else value

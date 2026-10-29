@@ -99,6 +99,15 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
         pairs = [(r, lft) for lft, r in pairs]
         side = "LEFT"
     symbols = "".join(f"`{k}" for k, _ in pairs)
+    if side == "FULL":
+        if any(k != j for k, j in pairs):
+            return gen.refuse(
+                "FULL JOIN is translated on keys of one name (USING (k), or ON t.k = u.k): "
+                "q's joined table has one k, either side's"
+            )
+        from sqlglot_q.generator import FULL_JOIN
+
+        return f"{FULL_JOIN}[{symbols};{left};{right}]"
     if side or kind not in ("", "INNER"):
         if side != "LEFT":
             return gen.refuse(f"{side or kind} JOIN has no q translation here")
@@ -128,7 +137,7 @@ def ambiguous(gen: QGenerator, node: exp.Select) -> str | None:
     sides of a join, would be the same column. The keys of an inner join on
     one name are equal, so the same; a LEFT JOIN's right key is not (it is
     NULL where no row matches, and q keeps the left's)."""
-    shared, nullable = set(), set()
+    shared, nullable, full = set(), set(), set()
     from_name = node.args["from_"].this.alias_or_name
     for join in node.args.get("joins") or []:
         side = (join.args.get("side") or "").upper()
@@ -143,6 +152,10 @@ def ambiguous(gen: QGenerator, node: exp.Select) -> str | None:
             nullable |= {(join.this.alias_or_name, k) for k in same}
         elif side == "RIGHT":
             nullable |= {(from_name, k) for k in same}
+        elif side == "FULL":
+            # Either side's key is NULL where the other's row has no match;
+            # the joined table's one key is the side that has it (USING's).
+            full |= {(t, k) for k in same for t in (from_name, join.this.alias_or_name)}
         else:
             shared |= set(same)
     tables: dict[str, set[str]] = {}
@@ -151,6 +164,12 @@ def ambiguous(gen: QGenerator, node: exp.Select) -> str | None:
             continue
         if col.find_ancestor(exp.Join) is not None:
             continue
+        if (col.table, col.name) in full:
+            return gen.refuse(
+                f"{col.sql()}: either side's key of a FULL JOIN is NULL where the other has no "
+                "match; the joined q table has one key, the side's that has it. Join USING "
+                f"({col.name}) and select {col.name}"
+            )
         if (col.table, col.name) in nullable:
             return gen.refuse(
                 f"{col.sql()}: the outer side's key of a join is NULL where no row matches; "

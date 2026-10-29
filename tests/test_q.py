@@ -326,8 +326,8 @@ class TestWindows(Validator):
     def test_refusals(self):
         self.refuses("SELECT LAG(x, o) OVER (ORDER BY o) FROM t", "literal offset")
         self.refuses(
-            "SELECT SUM(x) OVER (ORDER BY o ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t",
-            "current row",
+            "SELECT SUM(x) OVER (ORDER BY o RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t",
+            "RANGE frame",
         )
 
 
@@ -354,17 +354,17 @@ class TestStatements(Validator):
 
 class TestRefusals(Validator):
     def test_unsupported_constructs_raise_by_default(self):
-        self.refuses("SELECT a FROM t FULL JOIN u ON t.k = u.k", "FULL JOIN")
+        self.refuses("SELECT a FROM t FULL JOIN u ON t.k = u.j", "FULL JOIN")
         self.refuses("SELECT a FROM t JOIN u ON k = j", "told apart")
         self.refuses("SELECT NTH_VALUE(a, 2) OVER (ORDER BY a) FROM t", "NthValue")
         self.refuses("SELECT count FROM t", "q keyword")
         self.refuses("SELECT a FROM db.t", "qualified table")
-        self.refuses("SELECT a FROM t ORDER BY a + 1", "ORDER BY")
+        self.refuses("SELECT DISTINCT a FROM t ORDER BY a + 1", "ORDER BY")
         self.refuses("SELECT a FROM t WHERE d = NULL", "IS NULL")
 
     def test_ignore_level_still_emits_q_that_refuses(self):
         q = sqlglot.transpile(
-            "SELECT a FROM t FULL JOIN u ON t.k = u.k",
+            "SELECT a FROM t FULL JOIN u ON t.k = u.j",
             write="q",
             unsupported_level=ErrorLevel.IGNORE,
         )[0]

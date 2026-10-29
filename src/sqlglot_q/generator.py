@@ -174,7 +174,43 @@ TEXT_OF = (
 # LEFT JOIN: ej's matches, and the left rows with none (uj gives them the
 # right's columns, null).
 LEFT_JOIN = "{k:(),x;ej[k;y;z] uj y where not (k#y) in k#z}"
+# FULL JOIN: the matches of the rows with no null key, then each side's rows
+# with no match (a null key matches nothing), the other side's columns null.
+FULL_JOIN = (
+    "{k:(),x;n:{max each null x#y}[k];a:y where not n y;b:z where not n z;"
+    "(ej[k;a;b] uj y where not (k#y) in k#b) uj z where not (k#z) in k#a}"
+)
 HALF_EVEN = "{f:floor x+0.5;f-(x=f-0.5)&1=f mod 2}"
+# A ROWS frame from a to b rows off the current one (0N: unbounded), each
+# row's slice of its partition aggregated without its nulls; NULL over none.
+# BOOL_AND and BOOL_OR over where the condition is true (x) and where it is
+# known (y): SQL skips the unknown rows. NULL over none is false in q, which
+# has no null boolean.
+BOOL_AND = "{(all x where y)&any y}"
+# INTERSECT ALL and EXCEPT ALL: each row numbered among its copies, so the
+# n-th copy in x is kept when y has an n-th too (or, for EXCEPT, has not).
+MULTISET = (
+    "{o:{g:group x;@[count[x]#0;raze value g;:;raze til each count each value g]};"
+    "a:x,'([]q_n:o x);(cols x)#a where WHERE a in y,'([]q_n:o y)}"
+)
+INTERSECT_ALL = MULTISET.replace("WHERE ", "")
+EXCEPT_ALL = MULTISET.replace("WHERE ", "not ")
+BOOL_OR = "{any x where y}"
+FRAME_SLICES = (
+    "{[a;b;y] n:count y;i:til n;l:$[null a;n#0;0|i+a];h:$[null b;n#n-1;(n-1)&i+b];"
+    "AGG each {x y+til 0|1+z-y}[y]'[l;h]}"
+)
+FRAMES = {
+    name: FRAME_SLICES.replace("AGG", agg)
+    for name, agg in (
+        ("sum", "{$[count w:x where not null x;sum w;x 0N]}"),
+        ("avg", "avg"),
+        ("max", "{$[count w:x where not null x;max w;x 0N]}"),
+        ("min", "{$[count w:x where not null x;min w;x 0N]}"),
+        ("count", "{sum not null x}"),
+        ("count_star", "count"),
+    )
+}
 
 TEXT = {
     exp.DataType.Type.VARCHAR,
@@ -707,6 +743,19 @@ class QGenerator(Generator):
             case.meta["text"] = True  # NULLIF(w, ''): the branches are text
         return self.case_sql(case)
 
+    def logical(self, node: exp.Expr) -> str:
+        from sqlglot_q.truth import fails, holds
+
+        cond = node.this
+        while isinstance(cond, exp.Cast) and cond.to.this == exp.DataType.Type.BOOLEAN:
+            cond = cond.this  # DuckDB writes BOOL_AND(CAST(c AS BOOLEAN))
+        word = BOOL_AND if isinstance(node, exp.LogicalAnd) else BOOL_OR
+        true, false = holds(self, cond), fails(self, cond)
+        # An aggregate outermost, so select ... by takes it as one value.
+        return f"first enlist {word}[{true};({true})|{false}]"
+
+    logicaland_sql = logicalor_sql = logical
+
     def filter_sql(self, node: exp.Filter) -> str:
         agg, cond = node.this, node.expression.this
         where = self.condition(cond)
@@ -1025,10 +1074,12 @@ class QGenerator(Generator):
     def set_operation(self, node: exp.Expr, word: str) -> str:
         from sqlglot_q.query import limited
 
-        if not node.args.get("distinct"):
-            return self.refuse(f"{node.key.upper()} ALL has no q translation here")
         if node.args.get("order"):
             return self.refuse(f"ORDER BY after {node.key.upper()} has no q translation here")
+        if not node.args.get("distinct"):
+            word = INTERSECT_ALL if word == "inter" else EXCEPT_ALL
+            left, right = self.operand_query(node.this), self.operand_query(aligned(node))
+            return limited(self, node, f"{word}[{left};{right}]")
         # The rows of the first in (or not in) the second, each once, as
         # SQL's set operations; q's except and inter compare whole rows.
         left, right = self.operand_query(node.this), self.operand_query(aligned(node))
@@ -1371,10 +1422,13 @@ def _select_rewrites():
     from sqlglot import transforms
 
     from sqlglot_q.rewrites import (
+        correlated_scalars,
         expand_group_by_all,
         join_conditions,
+        order_by_expression,
         q_names,
         quantified_in,
+        regex_like,
     )
 
     # sqlglot's own rewrites, as its dialects use them: QUALIFY and DISTINCT
@@ -1385,7 +1439,10 @@ def _select_rewrites():
             transforms.eliminate_distinct_on,
             expand_group_by_all,
             quantified_in,
+            correlated_scalars,
             join_conditions,
+            regex_like,
+            order_by_expression,
             q_names,
         ]
     )

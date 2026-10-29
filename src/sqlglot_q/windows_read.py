@@ -211,6 +211,26 @@ def function(parser, value, order, non_null, QCall):
         return exp.PercentRank(), None, True
     if isinstance(value, QCall) and value.args["fn"] == "cume_dist":
         return exp.CumeDist(), exp.WindowSpec(**ROWS), True
+    if isinstance(value, QCall) and value.args["fn"].startswith("frame_"):
+        # A ROWS frame a to b rows off the current one; 0N is unbounded.
+        def bound(node, start):
+            if isinstance(node, exp.Null):
+                return "UNBOUNDED", "PRECEDING" if start else "FOLLOWING"
+            count = -int(node.this.name) if isinstance(node, exp.Neg) else int(node.name)
+            if count == 0:
+                return "CURRENT ROW", None
+            return exp.Literal.number(abs(count)), "PRECEDING" if count < 0 else "FOLLOWING"
+
+        start, start_side = bound(value.args["n"], True)
+        end, end_side = bound(value.args["default"], False)
+        spec = exp.WindowSpec(
+            kind="ROWS", start=start, start_side=start_side, end=end, end_side=end_side
+        )
+        name = value.args["fn"][len("frame_") :]
+        if name == "count_star":
+            return exp.Count(this=exp.Star()), spec, True
+        kinds = {"sum": exp.Sum, "avg": exp.Avg, "max": exp.Max, "min": exp.Min, "count": exp.Count}
+        return kinds[name](this=value.this), spec, True
     if isinstance(value, QCall):
         fn = value.args["fn"]
         if fn == "sums" and call(value.this, "differ"):
@@ -279,4 +299,7 @@ def fold(node: exp.Select) -> exp.Select:
     for key in ("order", "limit", "offset"):
         if node.args.get(key):
             folded.set(key, node.args[key])
+    if folded.args.get("order"):
+        # ORDER BY a column the fold took away is ORDER BY its expression.
+        folded.set("order", folded.args["order"].transform(swap))
     return folded

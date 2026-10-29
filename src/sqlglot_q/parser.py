@@ -24,11 +24,17 @@ from sqlglot.errors import ParseError
 from sqlglot_q import scalars
 from sqlglot_q.canonical import canonical
 from sqlglot_q.generator import (
+    BOOL_AND,
+    BOOL_OR,
     CUME_DIST,
     DOW,
     DOY,
+    EXCEPT_ALL,
+    FRAMES,
+    FULL_JOIN,
     HALF_EVEN,
     INT_DIV,
+    INTERSECT_ALL,
     LAG_DEFAULT,
     LEAD_DEFAULT,
     LEFT,
@@ -338,6 +344,12 @@ class Statement:
         from sqlglot_q.qnulls import faithful
 
         node = canonical(faithful(node.transform(literal)))
+        for found in node.find_all(exp.Intersect, exp.Except):
+            if found.meta.get("q_bare"):
+                self.fail(
+                    f"{'inter' if isinstance(found, exp.Intersect) else 'except'} of two "
+                    "tables keeps the first's copies; it is read under distinct"
+                )
         leftover = node.find(*HELPERS) if not isinstance(node, HELPERS) else node
         if leftover is not None:
             self.fail(f"{type(leftover).__name__.lower()} has no SQL form here")
@@ -518,6 +530,12 @@ class Statement:
             and call.aggregate
         ):
             return arg.this  # first enlist f[...]: an aggregate of scalars.py
+        if (
+            word == "first"
+            and isinstance(arg, Enlisted)
+            and isinstance(arg.this, (exp.LogicalAnd, exp.LogicalOr))
+        ):
+            return arg.this  # first enlist BOOL_AND[...]
         if word == "first" and isinstance(arg, Enlisted) and isinstance(arg.this, exp.GroupConcat):
             return arg.this  # first enlist: the text form
         if word == "first" and isinstance(arg, TextOrder) and arg.args.get("nonnull"):
@@ -598,6 +616,7 @@ class Statement:
         if word == "distinct":
             if isinstance(arg, (exp.Intersect, exp.Except)) and not arg.args.get("distinct"):
                 arg.set("distinct", True)  # distinct a inter b: INTERSECT
+                arg.meta.pop("q_bare", None)
                 return arg
             if is_query(arg):
                 arg.set("distinct", exp.Distinct())
@@ -643,9 +662,9 @@ class Statement:
         return exp.Cast(this=arg, to=exp.DataType(this=kind))
 
     def lambda_call(self, text: str, stop: set[str]) -> exp.Expr:
-        if text == LEFT_JOIN and self.is_("["):
+        if text in (LEFT_JOIN, FULL_JOIN) and self.is_("["):
             joined = self.equijoin()
-            joined.set("side", "LEFT")
+            joined.set("side", "LEFT" if text == LEFT_JOIN else "FULL")
             return joined
         if text == TEXT_OF:
             return exp.Cast(this=self.expr(stop), to=exp.DataType.build("VARCHAR"))
@@ -765,6 +784,35 @@ class Statement:
             return QCall(this=self.expr(stop), fn="sums")
         if text in (RUNNING_MAX, RUNNING_MIN):
             return QCall(this=self.expr(stop), fn="maxs" if text == RUNNING_MAX else "mins")
+        if text in (INTERSECT_ALL, EXCEPT_ALL) and self.is_("["):
+            self.expect("[")
+            left = self.expr(set())
+            self.expect(";")
+            right = self.expr(set())
+            self.expect("]")
+            if not (is_query(left) and is_query(right)):
+                self.fail("INTERSECT ALL and EXCEPT ALL are read over two queries")
+            kind = exp.Intersect if text == INTERSECT_ALL else exp.Except
+            return kind(this=left, expression=right, distinct=False)
+        if text in (BOOL_AND, BOOL_OR) and self.is_("["):
+            self.expect("[")
+            cond = self.expr(set())
+            self.expect(";")
+            self.expr(set())  # where it is known: read from the condition
+            self.expect("]")
+            kind = exp.LogicalAnd if text == BOOL_AND else exp.LogicalOr
+            return kind(this=cond)
+        if text in FRAMES.values():
+            fn = next(k for k, v in FRAMES.items() if v == text)
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            if len(args) != 3:
+                self.fail("a frame lambda with the wrong arguments")
+            return QCall(this=args[2], fn=f"frame_{fn}", n=args[0], default=args[1])
         if text in MOVING_NULLS.values():
             fn = next(k for k, v in MOVING_NULLS.items() if v == text)
             self.expect("[")
@@ -1070,7 +1118,11 @@ class Statement:
             return exp.Union(this=left, expression=right, distinct=False)
         if op in ("inter", "except") and is_query(left) and is_query(right):
             kind = exp.Intersect if op == "inter" else exp.Except
-            return kind(this=left, expression=right, distinct=False)
+            node = kind(this=left, expression=right, distinct=False)
+            # Read only under distinct: a inter b keeps a's copies, which is
+            # neither INTERSECT nor INTERSECT ALL.
+            node.meta["q_bare"] = True
+            return node
         if op == "insert":
             return inserted(self, left, right)
         self.fail(f"{op!r} has no SQL form here")
@@ -1467,6 +1519,9 @@ def source_table(parser: Statement, source: exp.Expr) -> tuple[exp.Expr, list[ex
             join = exp.Join(this=right, kind="CROSS")
         elif renamed:
             # ON t.a = u.k: the right side's key was copied to the left's name.
+            if isinstance(right, exp.Subquery) and not right.alias:
+                # A query joined on a renamed key: named, so ON can say whose.
+                right.set("alias", exp.TableAlias(this=exp.to_identifier(f"q_s{len(joins)}")))
             lname, rname = left.alias_or_name, right.alias_or_name
             if not (lname and rname) or set(renamed) - set(keys):
                 parser.fail("a renamed join side is read between two named tables")
