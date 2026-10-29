@@ -19,8 +19,6 @@ select from trades where sym=`EUR`USD
 select px by sym trades
 / refused: a where phrase is read as conditions only
 select from quotes where px:1
-/ refused: first has no SQL form here
-select first size by sym from trades
 
 / ~/q-corpus
 / refused: p.color is a foreign-key lookup in q, a table-qualified column in SQL

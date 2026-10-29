@@ -251,5 +251,10 @@ becomes `0!select ... by`); the second must not.
   side's qualified key), and correlated subqueries other than
   `EXISTS (... WHERE inner.k = outer.k ...)` and a one-key aggregate are
   refused.
+- `FIRST` and `LAST` (DuckDB's) are q's `first` and `last`: the first and
+  last row in the table's order, which SQL only promises for a plain scan.
+- `(a, b) IN (SELECT ...)` compares rows as q tables do, by type: a long
+  part against a float column raises `'type`. `ts - d` (a timestamp less a
+  date) raises `'type` too; the writer does not know the types.
 - `CURRENT_DATE` and `CURRENT_TIMESTAMP` are the q process's local clock
   (`.z.D`, `.z.P`), not the SQL session's time zone.

@@ -102,7 +102,49 @@ READ = [
     # q's -3 after a space is a negative number: abs -3 is abs[-3].
     ("([] a:enlist abs -3)", "SELECT ABS(-3) AS a"),
     ("select a:n - 1 from t", "SELECT n - 1 AS a FROM t"),
+    # count t on its own counts the table's rows.
+    ("count t", "SELECT COUNT(*) AS x FROM t"),
+    # union is distinct x,y.
+    ("(select g from t) union select g from u", "SELECT g FROM t UNION SELECT g FROM u"),
+    # sum[n] is sum n.
+    ("select m:max[n] from t", "SELECT MAX(n) AS m FROM t"),
+    # delete of a table value: the rows where the condition does not hold
+    # (q's is never unknown, so a null g is kept).
+    ("delete from t where g=`a", "SELECT * FROM t WHERE NOT COALESCE(g = 'a', FALSE)"),
+    ("delete n from t", "SELECT * EXCLUDE (n) FROM t"),
+    # first and last of a select, DuckDB's FIRST and LAST.
+    ("select last n by g from t", "SELECT g, LAST(n) FROM t GROUP BY g"),
+    # exec c on its own: SELECT c.
+    ("exec n from t where o>1", "SELECT n FROM t WHERE o > 1"),
 ]
+
+# Run in q and, read back, in DuckDB: the same rows.
+READ_RUN = [
+    "delete from t where n>2, o<3",
+    "select lo:first n, hi:last n by g from t where o>1",
+    "(select g from t) union select g from u",
+    "select r:sum[n]%count i by g from t",
+]
+
+
+@pytest.mark.parametrize("q", READ_RUN, ids=READ_RUN)
+def test_q_read_back_runs_the_same(q):
+    got = run_q(DATA, [q])[0]
+    assert not isinstance(got, str), got
+    sql = sqlglot.transpile(q, read="q", write="duckdb")[0]
+    assert same(got, run_duckdb(DATA, sql), False), sql
+
+
+REFUSED_READ = [
+    # i is q's row index: SQL's rows have no order to number.
+    "select from t where i<3",
+]
+
+
+@pytest.mark.parametrize("q", REFUSED_READ, ids=REFUSED_READ)
+def test_q_without_a_sql_form_is_refused(q):
+    with pytest.raises(sqlglot.errors.ParseError):
+        sqlglot.transpile(q, read="q", write="duckdb")
 
 
 @pytest.mark.parametrize(("q", "sql"), READ, ids=[q for q, _ in READ])

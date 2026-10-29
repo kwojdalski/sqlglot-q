@@ -874,6 +874,20 @@ class QGenerator(Generator):
             case.meta["text"] = True  # NULLIF(w, ''): the branches are text
         return self.case_sql(case)
 
+    def list_sql(self, node: exp.List) -> str:
+        # sqlglot before 30.x reads DuckDB's LIST(n) as List, not ArrayAgg.
+        if len(node.expressions) != 1:
+            return self.refuse("LIST is translated as the aggregate of one value")
+        return self.arrayagg_sql(exp.ArrayAgg(this=node.expressions[0].copy()))
+
+    def first_sql(self, node: exp.First) -> str:
+        # FIRST and LAST (DuckDB's): the first and last row's value, in the
+        # table's order, nulls and all: q's first and last.
+        return f"first {self.operand(node.this)}"
+
+    def last_sql(self, node: exp.Last) -> str:
+        return f"last {self.operand(node.this)}"
+
     def arrayagg_sql(self, node: exp.ArrayAgg) -> str:
         if node.args.get("order") or isinstance(node.this, (exp.Distinct, exp.Order)):
             return self.refuse("ARRAY_AGG with DISTINCT or ORDER BY has no q translation here")

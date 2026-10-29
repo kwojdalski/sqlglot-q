@@ -102,3 +102,6 @@ select m:med px where not null px, sd:sdev px, r:px cor qty by sym from trades
 select l:2 xlog qty from trades
 k:([id:`long$()] v:`float$())
 `k upsert (1;2.5)
+/ first and last of a group: DuckDB's FIRST and LAST, in the table's order
+select first size by sym from trades
+select lp:last px, fq:first qty from trades

@@ -2,6 +2,48 @@
 
 ## Unreleased
 
+A sweep of 50 problems, each with its case in
+`tests/integration/test_sql_sweep.py` (or the string-mode and calendar
+files) and round-tripped.
+
+Wrong answers, or q errors, on SQL that should translate:
+
+- `GROUP BY` with nothing computed over a key-only source raised `'rank`;
+  `HAVING` took a subquery's aggregate for the group's.
+- `x IN (SELECT ...)` followed by another condition raised `'type`: q's
+  `exec ... from` took the next constraint into its `from`. And a long
+  `IN` floats raised `'type`.
+- `DATE_TRUNC('day'/'hour', date)` and `TIME_BUCKET` of a DATE were
+  2000-01-01: a timespan `xbar` of a date counts its days as nanoseconds.
+- `ts + INTERVAL n MONTH` raised `'type` on a timestamp.
+- Running, sliding and framed `MIN`/`MAX` of text raised `'type` (now by
+  ranks, `iasc iasc x`).
+- `LIKE '%%'` was q's `**` (`'nyi`); `SPLIT_PART` on `''` raised `'length`.
+- Text functions of a literal (`REPLACE('abc', ...)`, `LENGTH('abc')`)
+  walked its characters; a constant piece of a concatenation was paired
+  row by row.
+- `UNION`/`INTERSECT` with a `SELECT` of constants raised `'mismatch`.
+- String mode: `w < v`, `BETWEEN`, `COALESCE(w, v)` and `w = (SELECT ...)`
+  raised `'length`; sliding text `MIN`, `MAX(w) OVER ()` and `FIRST_VALUE`
+  of text raised `'type`/`'length`.
+- `CAST(ts AS VARCHAR)` was q's `2024.01.15D09:30:00.000000000`, and a
+  whole float lost its `.0`.
+
+Now translated: `t.*` of one table, `LIKE` a per-row pattern, `(a, b) IN
+(SELECT ...)`, `ARRAY_AGG`/`LIST`, `FIRST`/`LAST`, `HOUR`/`MINUTE`/`SECOND`,
+`EPOCH` and `EXTRACT(epoch|week)`, `DATE_DIFF` in hours, minutes, seconds and
+quarters, `DATE_TRUNC` of a DATE literal.
+
+Reading q:
+
+- `abs -3` read as `abs - 3` (q's `-3` after a space is a number);
+  `count t` as a bare `COUNT(*)`; `select l:n by g` as an ungrouped column;
+  a window over a join, `inter` as a `FROM` source, an aggregate in an
+  update without `by` (it lost its `OVER ()`) and string mode's
+  `enlist "abc"` did not read back.
+- Newly read: `union`, `sum[x]`, `delete ... from` a table value, `first`
+  and `last` of a select, `exec`. q's row index `i` is refused.
+
 Fixed, where q answered something other than SQL with no error
 (`tests/integration/test_sql_more.py`):
 

@@ -132,6 +132,7 @@ KEYWORD_DYADS = {
     "cross",
     "inter",
     "except",
+    "union",
     "xcol",
     "insert",
     "upsert",
@@ -349,6 +350,18 @@ class Statement:
             self.fail(f"unexpected {self.peek().text!r}")
         if isinstance(node, TableLiteral):
             node = no_from(self, node)
+        if isinstance(node, Exec):
+            # exec c from t, on its own: the values of the one column, which
+            # SQL returns as the rows of SELECT c.
+            node = node.this
+        if isinstance(node, exp.Count) and node.meta.get("of"):
+            # count t, outside a select: the rows of the table t.
+            node = exp.Select(expressions=[exp.alias_(node, "x")]).from_(
+                table(self, node.meta["of"]), copy=False
+            )
+        for column in node.find_all(exp.Column):
+            if column.name == "i" and not column.table:
+                self.fail("i is q's row index, and SQL's rows have no order to number")
         from sqlglot_q.qnulls import faithful
 
         node = canonical(faithful(node.transform(literal)))
@@ -484,6 +497,14 @@ class Statement:
             else:
                 args = [self.expr(stop)]
             return exp.Anonymous(this=name, expressions=args)
+        if word in MONADS and self.is_("[") and not self.is_(";", 2):
+            # sum[qty] is sum qty: the one argument in brackets.
+            self.expect("[")
+            arg = self.expr(set())
+            if self.is_("]"):
+                self.next()
+                return self.monad(word, arg)
+            self.fail(f"{word}[...] is read with one argument")
         if word in MONADS and (self.starts_term() or self.peek_query()):
             return self.monad(word, self.expr(stop))
         if word in MONADS | KEYWORD_DYADS | QUERY_WORDS:
@@ -603,7 +624,9 @@ class Statement:
         if word in WINDOW_MONADS or word == "asc":
             return QCall(this=arg, fn=word)
         if word == "count" and isinstance(bare(arg), exp.Column) and bare(arg).name != "i":
-            return exp.Count(this=exp.Star())  # count x is the rows, nulls and all
+            node = exp.Count(this=exp.Star())  # count x is the rows, nulls and all
+            node.meta["of"] = bare(arg).name  # at the top, count t: t's rows
+            return node
         if word == "count" and is_query(arg):
             return CountRows(this=arg)
         if word == "count":
@@ -1212,7 +1235,7 @@ class Statement:
             return Joined(this=left, expression=right, keys=[], side="CROSS")
         if op == "xcol":
             return renamed(self, left, right)
-        if op in (",", "inter", "except"):
+        if op in (",", "inter", "except", "union"):
             # ([] g:enlist `a): a SELECT of constants, as a set operation's side.
             def constants(side):
                 inner = side
@@ -1221,6 +1244,9 @@ class Statement:
                 return no_from(self, inner) if isinstance(inner, TableLiteral) else side
 
             left, right = constants(left), constants(right)
+        if op == "union" and is_query(left) and is_query(right):
+            # x union y is distinct x,y: SQL's UNION.
+            return exp.Union(this=left, expression=right, distinct=True)
         if op == "," and is_query(left) and is_query(right):
             return exp.Union(this=left, expression=right, distinct=False)
         if op in ("inter", "except") and is_query(left) and is_query(right):
@@ -1266,6 +1292,10 @@ class Statement:
             where = self.conditions(stop)
         if where is not None:
             where = scalar_aggregates(self, where, source)
+        if word == "select":
+            # first x and last x of a select: the first and last row's value,
+            # nulls and all, as DuckDB's FIRST and LAST in a table's order.
+            cols = [first_last(c) for c in cols]
         if keys:
             cols = [per_group(c, keys) for c in cols]
         elif word == "select":
@@ -1355,6 +1385,11 @@ class Statement:
             if not (ns and ns.kind == "sym" and ns.value == ["."]):
                 # delete a,b from a table value: SELECT * EXCLUDE (a, b).
                 source = self.expr(stop)
+                if isinstance(bare(source), exp.Column):
+                    # delete a from t: t's other columns.
+                    source = exp.Select(expressions=[exp.Star()]).from_(
+                        table(self, bare(source).name), copy=False
+                    )
                 if not is_query(source):
                     self.fail("delete of columns is read from a query, as SELECT * EXCLUDE")
                 return excluded(self, names, source)
@@ -1367,6 +1402,24 @@ class Statement:
                 return exp.Drop(tables=[target], kind="TABLE")
             return exp.Drop(this=target, kind="TABLE")
         self.next()
+        tok = self.peek()
+        if not (tok and tok.kind == "sym"):
+            # delete from t where c, of a table value: t without the rows
+            # where c holds, SELECT * WHERE NOT c (q's c is never unknown).
+            source = self.expr(stop | {"where"})
+            if isinstance(bare(source), exp.Column):
+                source = table(self, bare(source).name)
+            elif is_query(source):
+                source = exp.Subquery(this=source)
+            else:
+                self.fail("delete from is read on a table or a query")
+            node = exp.Select(expressions=[exp.Star()]).from_(source, copy=False)
+            if self.is_("where"):
+                self.next()
+                node.set(
+                    "where", exp.Where(this=exp.Not(this=exp.Paren(this=self.conditions(stop))))
+                )
+            return node
         target = self.table_symbol()
         where = None
         if self.is_("where"):
@@ -1710,6 +1763,20 @@ def select(parser, cols, keys, source, where, distinct) -> exp.Select:
 
 def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
+
+
+def first_last(item: exp.Expr) -> exp.Expr:
+    def swap(node: exp.Expr) -> exp.Expr:
+        if (
+            isinstance(node, QCall)
+            and node.args["fn"] in ("first", "last")
+            and not node.args.get("n")
+        ):
+            kind = exp.First if node.args["fn"] == "first" else exp.Last
+            return kind(this=node.this)
+        return node
+
+    return item.transform(swap)
 
 
 def per_group(item: exp.Expr, keys: list[exp.Expr]) -> exp.Expr:
