@@ -73,6 +73,44 @@ Each of these was measured in q 5 and is pinned by `tests/integration`.
 | `ASOF LEFT JOIN q USING (sym, time)` | `aj[...;t;q]` | aj wants the right table sorted | `` aj[`sym`time;t;`sym`time xasc q] `` |
 | alias `"p.0"` | `p.0:...` | not a name q can write in a select | placeholder, then `` `p.0 xcol `` |
 
+## NULL
+
+SQL has a third truth value, unknown, and q has none: a q null is the
+smallest value of its type, so `0N<3`, `0N<>3` and `0N=0N` are all true, and
+`not` turns false into true. Where SQL keeps rows on a condition (`WHERE`,
+`HAVING`, `CASE WHEN`, `FILTER`), `truth.py` writes what makes the condition
+*definitely true*, and a `NOT` as what makes its operand *definitely false*:
+
+| SQL | q | why |
+|---|---|---|
+| `a > 3`, `a = 3`, `a >= 3` | `a>3` | a null is already not greater, nor equal to a literal |
+| `a < 3`, `a <= 3` | `(not null a)&a<3` | `0N<3` is true |
+| `a <> 3`, `a <> b` | `(not null a)&a<>3` | `0N<>3` is true |
+| `a = b` | `(not null a)&a=b` | `0N=0N` is true |
+| `NOT (a > 2)` | `(not null a)&a<=2` | `not 0N>2` is true |
+| `NOT (p OR q)` | `NOT p, NOT q` | De Morgan, as a where list |
+| `x NOT IN (1, NULL)` | `0b` | never true in SQL |
+| `x NOT IN (SELECT ...)` | `... &not any null S` | never true once the subquery has a null |
+| `b LIKE '%'` | `(not null b)&b like "*"` | a null symbol is ` , which `*` matches; other patterns need no guard |
+
+A guard goes only on a side that can be null and would make q say yes. In a
+select list a comparison is still q's boolean, which cannot be null.
+
+Aggregates and joins:
+
+| SQL | q | why |
+|---|---|---|
+| `SUM(x)` | `sum {$[all null x;x 0N;x]} x` | `sum` of no values is 0, SQL's NULL |
+| `MIN(x)`, `MAX(x)` | `first asc x where not null x`, `last asc x` | `min` of no values is `0W`; `min` and `max` refuse symbols |
+| `MEDIAN(x)` | `med x where not null x` | `med` counts a null as the smallest value |
+| `LENGTH(b)` | `{?[null x;0N;count each string x]} b` | the length of a null symbol is 0 |
+| `JOIN ... ON t.k = u.k` | `ej[`k;(select from t where not null k);u]` | `0N=0N`: null keys would pair up |
+| `-7 % 3` | `{x-y*signum[x%y]*floor abs x%y}[-7;3]` | q's `mod` floors (2); SQL's `%` keeps the sign (-1) |
+| `CAST('5' AS BIGINT)` | `"J"$"5"` | `` `long$`5 `` is `'type` |
+
+Reading q back is the same table backwards: plain q `sum x` is
+`COALESCE(SUM(x), 0)`, and `x mod y` is `((x % y) + y) % y`.
+
 ## Window functions
 
 SQL computes a select's windows after `WHERE` and before the projection,
@@ -143,6 +181,9 @@ becomes `0!select ... by`); the second must not.
   start or end with one is refused; use `string_literals="string"`.
 - In q a null symbol is the empty symbol, so SQL's `''` and `NULL` text are
   one value there.
+- `CAST(x AS VARCHAR)` of a float is q's `string`, which prints with q's
+  display precision (7 significant digits by default) and drops a `.0`:
+  `0.0` is `"0"` where SQL writes `'0.0'`.
 - `UNION` matches columns by name in q and by position in SQL.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.

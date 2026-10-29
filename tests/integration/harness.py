@@ -25,7 +25,13 @@ def q_binary() -> str | None:
 
 
 def q_column(values: list) -> str:
-    """A Python column as a q list literal of one type."""
+    """A Python column as a q list literal of one type. One value is a
+    one-item list (enlist), not the atom q would read the bare literal as."""
+    text = q_items(values)
+    return f"enlist {text}" if len(values) == 1 and not text.startswith("`$(") else text
+
+
+def q_items(values: list) -> str:
     present = [v for v in values if v is not None]
     if present and all(isinstance(v, dt.datetime) for v in present):
         return " ".join(
@@ -83,7 +89,8 @@ def run_q(tables: dict[str, dict[str, list]], queries: list[str]) -> list[Rows |
         )
     results: list[Rows | str] = []
     for line in out.stdout.splitlines():
-        answer = json.loads(line)
+        # q's JSON writes float infinities as inf, which JSON has no word for.
+        answer = json.loads(re.sub(r"(?<![A-Za-z\"])(-?)inf(?![A-Za-z\"])", r"\1Infinity", line))
         if answer["ok"]:
             results.append([tuple(row) for row in answer["rows"]])
         else:

@@ -95,6 +95,16 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
         pairs = [(r, lft) for lft, r in pairs]
         side = "LEFT"
     symbols = "".join(f"`{k}" for k, _ in pairs)
+    if side or kind not in ("", "INNER"):
+        if side != "LEFT":
+            return gen.refuse(f"{side or kind} JOIN has no q translation here")
+    # A null key matches nothing in SQL; in q 0N=0N, so ej and lj would pair
+    # null keys up. A LEFT JOIN's right side loses its null keys (each left
+    # row still appears); an inner join's left side does.
+    if side == "LEFT":
+        right = f"(select from {wrap(right)} where {non_null([j for _, j in pairs])})"
+    else:
+        left = f"(select from {wrap(left)} where {non_null([k for k, _ in pairs])})"
     renames = [(k, j) for k, j in pairs if k != j]
     if renames:
         # ON t.a = u.b: u gets a copy of b named a to join on, and keeps b.
@@ -104,9 +114,11 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
         # lj takes the first match on the right, which is SQL's LEFT JOIN when
         # the right side is unique on the keys.
         return f"{left} lj {symbols} xkey {right}"
-    if side or kind not in ("", "INNER"):
-        return gen.refuse(f"{side or kind} JOIN has no q translation here")
     return f"ej[{symbols};{left};{right}]"
+
+
+def non_null(keys: list[str]) -> str:
+    return ", ".join(f"not null {k}" for k in keys)
 
 
 def asof(gen: QGenerator, left: str, right: str, join: exp.Join) -> str:
@@ -402,7 +414,7 @@ def grouped(
     if not reorder and condition is None:
         return inner, names
     picked = "" if not reorder else " " + ", ".join(gen.name(n) for n in names)
-    filt = f" where {gen.sql(condition)}" if condition is not None else ""
+    filt = f" where {gen.condition(condition)}" if condition is not None else ""
     return f"select{picked} from ({inner}){filt}", names
 
 

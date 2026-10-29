@@ -26,7 +26,11 @@ from sqlglot_q.generator import (
     HALF_EVEN,
     INT_DIV,
     LEFT,
+    LENGTH,
+    MOD,
     NAME,
+    NON_NULL,
+    NULLS,
     RESERVED,
     RIGHT,
     ROUND,
@@ -101,7 +105,7 @@ STATISTICS = {
     "var": exp.VariancePop,
 }
 MONADS = (
-    {"signum", "trim", "ltrim", "rtrim", "med"}
+    {"signum", "trim", "ltrim", "rtrim", "med", "any", "asc"}
     | set(STATISTICS)
     | WINDOW_MONADS
     | {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
@@ -438,15 +442,37 @@ class Statement:
         tok = self.peek()
         return tok is not None and tok.kind == "name" and tok.text in QUERY_WORDS
 
+    def aggregate_of(self, word: str, arg: exp.Expr) -> exp.Expr:
+        if isinstance(arg, Index) and isinstance(arg.expression, Where_):
+            agg = AGGREGATES[word](this=arg.this)
+            return exp.Filter(this=agg, expression=exp.Where(this=arg.expression.this))
+        return AGGREGATES[word](this=arg)
+
     def monad(self, word: str, arg: exp.Expr) -> exp.Expr:
+        if word == "not" and isinstance(arg, NoNulls):
+            return arg
         if word == "not":
             return exp.Not(this=arg)
+        if word == "any" and isinstance(arg, exp.Is) and isinstance(arg.this, Exec):
+            return NoNulls(this=arg.this)
         if word == "null":
             return exp.Is(this=arg, expression=exp.Null())
         if word == "neg":
             return exp.Neg(this=arg)
         if word == "string":
             return exp.Cast(this=arg, to=exp.DataType.build("VARCHAR"))
+        if word == "sum" and isinstance(arg, NullsAsNull):
+            return self.aggregate_of("sum", arg.this)  # SUM, NULL over no values
+        if word == "sum" and not boolean(arg):
+            # q's sum over no values (or only nulls) is 0; SQL's SUM is NULL.
+            total = self.aggregate_of("sum", arg)
+            return exp.Coalesce(this=total, expressions=[exp.Literal.number(0)])
+        if word == "first" and isinstance(arg, QCall) and arg.args["fn"] == "asc":
+            inner = arg.this
+            if isinstance(inner, NonNull):
+                return aggregate(exp.Min, inner.this)  # first asc of the non-nulls
+        if word == "last" and isinstance(arg, QCall) and arg.args["fn"] == "asc":
+            return aggregate(exp.Max, arg.this)  # last asc: nulls sort first
         if word == "sum" and boolean(arg):
             return exp.CountIf(this=bare(arg))  # sum c counts the rows where c holds
         if word in STATISTICS:
@@ -468,7 +494,7 @@ class Statement:
             return exp.Trim(this=inner, position=position)
         if word in MONADIC:
             return MONADIC[word](this=arg)
-        if word in WINDOW_MONADS:
+        if word in WINDOW_MONADS or word == "asc":
             return QCall(this=arg, fn=word)
         if word == "count":
             if isinstance(arg, exp.Column) and arg.name == "i":
@@ -540,6 +566,19 @@ class Statement:
             # A lambda applies to all of the expression on its right.
             target = self.expr(stop)
             return null_order(self, target, nulls[2], first=nulls[1] == "idesc")
+        if text == NULLS:
+            return NullsAsNull(this=self.expr(stop))
+        if text == NON_NULL:
+            return NonNull(this=self.expr(stop))
+        if text in (LENGTH, MOD):
+            if text == LENGTH:
+                return exp.Length(this=self.expr(stop))
+            self.expect("[")
+            x = self.expr(set())
+            self.expect(";")
+            y = self.expr(set())
+            self.expect("]")
+            return exp.Mod(this=x, expression=y)
         if text in (*LEFT, *RIGHT):
             self.expect("[")
             n = self.expr(set())
@@ -654,6 +693,13 @@ class Statement:
             # = on a string compares it character by character; SQL's = on
             # strings is q's ~\: (match each).
             self.fail("= on a string compares characters: SQL equality is ~\\:")
+        if op in ("&", "and") and guard_of(left, right):
+            # (not null a)&a<3: the generator's guard for SQL's a < 3, which
+            # is never true on a null already.
+            return right
+        if op in ("&", "and") and isinstance(bare(right), NoNulls):
+            # (not x in S)&not any null S: SQL's x NOT IN (S)
+            return left
         if op in ("|", "&", "or", "and") and not (boolean(left) and boolean(right)):
             # | and & are max and min; only between conditions are they OR
             # and AND. max skips a null as GREATEST does; & does not, so a
@@ -682,6 +728,14 @@ class Statement:
             node = inserted(self, left, right)
             node.set("alternative", "REPLACE")  # INSERT OR REPLACE
             return node
+        if (
+            op == "$"
+            and isinstance(left, Chars)
+            and left.this in PARSE_TYPES
+            and isinstance(bare(right), Chars)
+        ):
+            kind = PARSE_TYPES[left.this]
+            return exp.Cast(this=exp.Literal.string(bare(right).this), to=exp.DataType(this=kind))
         if op == "$" and isinstance(left, exp.Paren) and isinstance(left.this, Index):
             fn = left.this.this
             if isinstance(fn, exp.Column) and fn.name == "type":
@@ -698,7 +752,10 @@ class Statement:
                 this=exp.Floor(this=exp.Div(this=right, expression=left)), expression=left
             )
         if op == "mod":
-            return exp.Mod(this=left, expression=right)
+            # q's mod floors (-7 mod 3 is 2); SQL's % takes the dividend's
+            # sign (-1). ((x % y) + y) % y is the floor modulo in SQL.
+            inner = exp.Add(this=exp.Mod(this=left, expression=right), expression=right.copy())
+            return exp.Mod(this=inner, expression=right.copy())
         if op == "^":
             # x^y is y with its nulls filled from x: COALESCE(y, x).
             items = right.expressions if isinstance(right, exp.Coalesce) else []
@@ -946,6 +1003,20 @@ class Joins(exp.Expression):
     arg_types = {"expressions": True}
 
 
+class NoNulls(exp.Expression):
+    """not any null S: S has no null."""
+
+    arg_types = {"this": True}
+
+
+class NullsAsNull(exp.Expression):
+    arg_types = {"this": True}
+
+
+class NonNull(exp.Expression):
+    arg_types = {"this": True}
+
+
 class Chars(exp.Expression):
     """A q string literal, kept apart from symbols until its use is known."""
 
@@ -1076,9 +1147,21 @@ def sql_pattern(q: str) -> str:
 def source_table(parser: Statement, source: exp.Expr) -> tuple[exp.Expr, list[exp.Join]]:
     """The FROM operand and its joins."""
     if isinstance(source, Joined):
-        left, joins = source_table(parser, source.this)
-        right = source.expression
+        keys = source.args["keys"]
+        side = source.args.get("side")
+        this, right = source.this, source.expression
+        # The generator drops null keys from the side matched against (a
+        # null key matches nothing in SQL); that filter is the join's own.
+        if side == "LEFT" and source.args.get("method") != "ASOF":
+            right = without_null_keys(right, keys)
+        elif not side:
+            this = without_null_keys(this, keys)
+        left, joins = source_table(parser, this)
         renamed = {}
+        if isinstance(right, Renamed) and side == "LEFT":
+            pairs = right.args["pairs"]
+            names = [dict(pairs).get(k, k) for k in keys]
+            right = Renamed(this=without_null_keys(right.this, names), pairs=pairs)
         if isinstance(right, Renamed):
             renamed = dict(right.args["pairs"])
             right = right.this
@@ -1252,6 +1335,9 @@ def inserted(parser: Statement, table: exp.Expr, values: exp.Expr) -> exp.Expr:
 
 
 HELPERS = (
+    NoNulls,
+    NullsAsNull,
+    NonNull,
     Renamed,
     TypedNull,
     QMin,
@@ -1391,3 +1477,78 @@ def excluded(parser, names, source) -> exp.Select:
     node = exp.Select(expressions=[exp.Star(except_=cols)])
     node.set("from_", exp.From(this=exp.Subquery(this=source)))
     return node
+
+
+# "J"$"5" and the like, read back as the SQL type each parse is.
+PARSE_TYPES = {
+    "B": exp.DataType.Type.BOOLEAN,
+    "H": exp.DataType.Type.SMALLINT,
+    "I": exp.DataType.Type.INT,
+    "J": exp.DataType.Type.BIGINT,
+    "E": exp.DataType.Type.FLOAT,
+    "F": exp.DataType.Type.DOUBLE,
+}
+
+
+def aggregate(kind, arg):
+    """An aggregate over x, or over x where c: SQL's FILTER (WHERE c)."""
+    if isinstance(arg, Index) and isinstance(arg.expression, Where_):
+        return exp.Filter(this=kind(this=arg.this), expression=exp.Where(this=arg.expression.this))
+    return kind(this=arg)
+
+
+def operands(node: exp.Expr) -> list[exp.Expr]:
+    node = bare(node)
+    if isinstance(node, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)):
+        return [bare(node.this), bare(node.expression)]
+    if isinstance(node, exp.In):
+        return [bare(node.this)]
+    if isinstance(node, exp.Between):
+        return [bare(node.this), bare(node.args["low"]), bare(node.args["high"])]
+    if isinstance(node, (exp.Like, exp.ILike)):
+        return [bare(node.this)]
+    if isinstance(node, exp.Not):
+        return operands(node.this)
+    return []
+
+
+def guard_of(left: exp.Expr, right: exp.Expr) -> bool:
+    """Whether left is `not null x` for an x the condition right compares."""
+    left = bare(left)
+    if not (isinstance(left, exp.Not) and isinstance(left.this, exp.Is)):
+        return False
+    subject = bare(left.this.this)
+    return any(subject == o for o in operands(right))
+
+
+def without_null_keys(node: exp.Expr, keys: list[str]) -> exp.Expr:
+    """select from t where not null k, ... over a join's keys: t."""
+    node = bare(node)
+    if not (isinstance(node, exp.Select) and len(node.expressions) == 1):
+        return node
+    if not isinstance(node.expressions[0], exp.Star) or node.expressions[0].args.get("except_"):
+        return node
+    if any(node.args.get(k) for k in ("joins", "group", "order", "limit", "distinct")):
+        return node
+    where = node.args.get("where")
+    if where is None:
+        return node
+    parts = []
+    stack = [where.this]
+    while stack:
+        part = bare(stack.pop())
+        if isinstance(part, exp.And):
+            stack += [part.this, part.expression]
+        else:
+            parts.append(part)
+    names = sorted(
+        p.this.this.name
+        for p in parts
+        if isinstance(p, exp.Not)
+        and isinstance(p.this, exp.Is)
+        and isinstance(p.this.this, exp.Column)
+    )
+    if len(names) != len(parts) or names != sorted(keys):
+        return node
+    source = node.args["from_"].this
+    return source.this if isinstance(source, exp.Subquery) else exp.column(source.name)

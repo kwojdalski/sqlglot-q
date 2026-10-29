@@ -27,7 +27,8 @@ def canonical(node: exp.Expr) -> exp.Expr:
     compound operand of an operator is parenthesised. sqlglot prints a tree
     without adding parentheses for precedence, so a*(b+c) read from q's
     a*b+c would otherwise print as a * b + c."""
-    node = node.transform(lambda n: n.this if isinstance(n, exp.Paren) else n)
+    node = strip_parens(node)
+    node = node.transform(unnegate)
 
     def wrap(n: exp.Expr) -> exp.Expr:
         if isinstance(n, (*COMPOUND, exp.Neg)):
@@ -43,3 +44,27 @@ def canonical(node: exp.Expr) -> exp.Expr:
         return n
 
     return node.transform(wrap)
+
+
+def unnegate(node: exp.Expr) -> exp.Expr:
+    """b NOT LIKE 'x%' arrives as Like(negate=True) from newer sqlglot; as
+    NOT around a plain Like, nothing downstream can miss the NOT."""
+    if node.args.get("negate"):
+        node = node.copy()
+        node.set("negate", None)
+        return exp.Not(this=node)
+    return node
+
+
+def strip_parens(node: exp.Expr) -> exp.Expr:
+    """Every Paren replaced by what it holds. sqlglot's transform does not
+    descend into a node it has just replaced, so ((x)) would keep its inner
+    parentheses; this removes them all."""
+    while isinstance(node, exp.Paren):
+        node = node.this
+    for paren in list(node.find_all(exp.Paren)):
+        inner = paren.this
+        while isinstance(inner, exp.Paren):
+            inner = inner.this
+        paren.replace(inner)
+    return node

@@ -59,7 +59,8 @@ class TestSelect(Validator):
         self.validate("SELECT a * b + c FROM t", "select (a*b)+c from t")
         self.validate("SELECT a - (b - c) FROM t", "select a-(b-c) from t")
         self.validate("SELECT a / b FROM t", "select a%b from t")
-        self.validate("SELECT a % b FROM t", "select a mod b from t")
+        # SQL's % takes the dividend's sign; q's mod floors.
+        self.validate("SELECT a % b FROM t", "select {x-y*signum[x%y]*floor abs x%y}[a;b] from t")
 
     def test_literals(self):
         self.validate("SELECT a, 'abc', 'a b', '' FROM t", 'select a, `abc, `$("a b"), ` from t')
@@ -99,13 +100,18 @@ class TestSelect(Validator):
             "SELECT COUNT(DISTINCT d) FROM t",
             "select count distinct d where not null d from t",
         )
-        self.validate("SELECT SUM(a), AVG(b) FROM t", "select sum a, avg b from t")
+        self.validate(
+            "SELECT SUM(a), AVG(b) FROM t", "select sum {$[all null x;x 0N;x]} a, avg b from t"
+        )
 
     def test_group_by(self):
-        self.validate("SELECT b, SUM(a) FROM t GROUP BY b", "0!select sum a by b from t")
+        self.validate(
+            "SELECT b, SUM(a) FROM t GROUP BY b",
+            "0!select sum {$[all null x;x 0N;x]} a by b from t",
+        )
         self.validate(
             "SELECT SUM(a) AS s, b FROM t GROUP BY b",
-            "select s, b from (0!select s:sum a by b from t)",
+            "select s, b from (0!select s:sum {$[all null x;x 0N;x]} a by b from t)",
         )
         self.validate(
             "SELECT b, COUNT(*) AS n FROM t GROUP BY b HAVING COUNT(*) > 1",
@@ -113,7 +119,7 @@ class TestSelect(Validator):
         )
         self.validate(
             "SELECT b FROM t GROUP BY b HAVING SUM(a) > 6",
-            "select b from (0!select h0:sum a by b from t) where h0>6",
+            "select b from (0!select h0:sum {$[all null x;x 0N;x]} a by b from t) where h0>6",
         )
 
     def test_order_and_limit(self):
@@ -126,15 +132,25 @@ class TestSelect(Validator):
         self.validate("SELECT a FROM t LIMIT 2 OFFSET 3", "(3;2) sublist (select a from t)")
 
     def test_joins(self):
-        self.validate("SELECT * FROM t JOIN u ON t.k = u.k", "select from ej[`k;t;u]")
-        self.validate("SELECT * FROM t JOIN u USING (k, j)", "select from ej[`k`j;t;u]")
-        self.validate("SELECT * FROM t LEFT JOIN u ON t.k = u.k", "select from t lj `k xkey u")
+        self.validate(
+            "SELECT * FROM t JOIN u ON t.k = u.k",
+            "select from ej[`k;(select from t where not null k);u]",
+        )
+        self.validate(
+            "SELECT * FROM t JOIN u USING (k, j)",
+            "select from ej[`k`j;(select from t where not null k, not null j);u]",
+        )
+        self.validate(
+            "SELECT * FROM t LEFT JOIN u ON t.k = u.k",
+            "select from t lj `k xkey (select from u where not null k)",
+        )
         self.validate("SELECT * FROM t CROSS JOIN u", "select from t cross u")
 
     def test_subqueries(self):
         self.validate(
             "SELECT a FROM t WHERE a > (SELECT AVG(a) FROM t)",
-            "select a from t where a>(first exec x from (select x:avg a from t))",
+            "select a from t where (not null (first exec x from (select x:avg a from t)))"
+            "&a>(first exec x from (select x:avg a from t))",
         )
         self.validate("SELECT s FROM (SELECT a AS s FROM t)", "select s from (select s:a from t)")
 
@@ -202,7 +218,8 @@ class TestTemporal(Validator):
             "select a from t where ts>2024.01.15D09:30:00.500000000",
         )
         self.validate(
-            "SELECT a FROM t WHERE tm < TIME '09:30:00'", "select a from t where tm<09:30:00.000"
+            "SELECT a FROM t WHERE tm < TIME '09:30:00'",
+            "select a from t where (not null tm)&tm<09:30:00.000",
         )
 
     def test_intervals_are_timespans(self):
@@ -247,7 +264,7 @@ class TestWindows(Validator):
     def test_whole_partition_is_the_aggregate(self):
         self.validate(
             "SELECT g, SUM(x) OVER (PARTITION BY g) AS s FROM t",
-            "select g, s from (update s:sum x by g from t)",
+            "select g, s from (update s:sum {$[all null x;x 0N;x]} x by g from t)",
         )
 
     def test_running_rows_and_range(self):
@@ -285,7 +302,8 @@ class TestWindows(Validator):
     def test_where_runs_first(self):
         self.validate(
             "SELECT SUM(x) OVER (PARTITION BY g) AS s FROM t WHERE x > 1",
-            "select s from (update s:sum x by g from (select from t where x>1))",
+            "select s from (update s:sum {$[all null x;x 0N;x]} x by g from "
+            "(select from t where x>1))",
         )
 
     def test_reading_back(self):

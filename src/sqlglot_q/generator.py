@@ -73,6 +73,19 @@ MONADIC = {
 ROUND = "{signum[x]*floor 0.5+abs x}"  # half away from zero, as SQL
 ROUND_TO = "{(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y}"
 INT_DIV = "{signum[x*y]*div[abs x;abs y]}"  # toward zero; q's div floors
+MOD = "{x-y*signum[x%y]*floor abs x%y}"  # SQL's %: the dividend's sign
+LENGTH = "{?[null x;0N;count each string x]}"  # a null symbol has no length
+# Aggregates of no values (none, or all null) are NULL in SQL; q's sum is 0,
+# min and max are 0W and -0W. And q's min and max refuse symbols ('type),
+# where SQL's take the text's order.
+# Each starts with an aggregate q knows (sum, first, last): q's select only
+# takes a lambda's result as one row when an aggregate is outermost.
+NULLS = "{$[all null x;x 0N;x]}"  # all null (or none): a null, which sum keeps
+NON_NULL = "{x where not null x}"
+SUM = f"sum {NULLS}"
+MIN = f"first asc {NON_NULL}"  # asc orders symbols too; first of none is null
+MAX = "last asc"  # nulls sort first, so last is the largest
+PARSE = {"boolean": "B", "short": "H", "int": "I", "long": "J", "real": "E", "float": "F"}
 # LEFT(s, n) and RIGHT(s, n): sublist, not #, which repeats a short string.
 LEFT = ("{`$x sublist/:string y}", "{x sublist/:y}")
 RIGHT = ("{`$(neg x) sublist/:string y}", "{(neg x) sublist/:y}")
@@ -341,7 +354,13 @@ class QGenerator(Generator):
     add_sql = sub_sql = mul_sql = div_sql = and_sql = or_sql = binary
 
     def mod_sql(self, node: exp.Mod) -> str:
-        return f"{self.operand(node.this)} mod {self.operand(node.expression)}"
+        floor = floor_mod(node)
+        if floor is not None:
+            # ((x % y) + y) % y is the floor modulo, which is q's mod.
+            x, y = floor
+            return f"{self.operand(x)} mod {self.operand(y)}"
+        # SQL's % takes the dividend's sign (-7 % 3 is -1); q's mod floors (2).
+        return f"{MOD}[{self.sql(node.this)};{self.sql(node.expression)}]"
 
     def not_sql(self, node: exp.Not) -> str:
         return f"not {self.sql(node.this)}"
@@ -414,7 +433,8 @@ class QGenerator(Generator):
             return self.refuse(
                 f"{node.sql()}: DISTINCT inside an aggregate is only translated for COUNT"
             )
-        return f"{AGGREGATES[type(node)]} {self.sql(node.this)}"
+        word = NULL_SAFE.get(type(node), AGGREGATES[type(node)])
+        return f"{word} {self.sql(node.this)}"
 
     sum_sql = avg_sql = min_sql = max_sql = aggregate
 
@@ -467,11 +487,12 @@ class QGenerator(Generator):
 
     def filter_sql(self, node: exp.Filter) -> str:
         agg, cond = node.this, node.expression.this
-        where = self.sql(cond)
+        where = self.condition(cond)
         if isinstance(agg, exp.Count) and (agg.this is None or isinstance(agg.this, exp.Star)):
             return f"count i where {where}"
         if type(agg) in AGGREGATES and not agg.args.get("distinct"):
-            return f"{AGGREGATES[type(agg)]} {self.operand(agg.this)} where {where}"
+            word = NULL_SAFE.get(type(agg), AGGREGATES[type(agg)])
+            return f"{word} {self.operand(agg.this)} where {where}"
         return self.refuse(f"{agg.sql()} FILTER (...) has no q translation here")
 
     def trim_sql(self, node: exp.Trim) -> str:
@@ -534,8 +555,10 @@ class QGenerator(Generator):
         return f"`$({text})" if self.symbols else text
 
     def length_sql(self, node: exp.Length) -> str:
-        arg = self.sql(node.this)
-        return f"count each string {arg}" if self.symbols else f"count each {arg}"
+        if self.symbols:
+            # LENGTH(NULL) is NULL, where count each string ` is 0.
+            return f"{LENGTH} {self.operand(node.this)}"
+        return f"count each {self.operand(node.this)}"
 
     def coalesce_sql(self, node: exp.Coalesce) -> str:
         # x^y is y with its nulls filled from x, so the first argument goes last.
@@ -547,6 +570,10 @@ class QGenerator(Generator):
         if is_text(node.this) and kind in TEMPORAL:
             # DATE '2024-01-15' is a literal: q writes it 2024.01.15.
             return self.temporal(node.this.this, kind)
+        if is_text(node.this) and kind in TYPES and TYPES[kind][0] in PARSE:
+            # CAST('5' AS BIGINT) parses the text: q's "J"$"5". `long$ of
+            # the symbol `5 is 'type.
+            return f'"{PARSE[TYPES[kind][0]]}"${self.chars(node.this.this)}'
         arg = self.operand(node.this)
         if kind in TEXT:
             return f"`$string {arg}" if self.symbols else f"string {arg}"
@@ -638,14 +665,14 @@ class QGenerator(Generator):
             cond = when.this
             if subject is not None:
                 cond = exp.EQ(this=subject.copy(), expression=cond.copy())
-            text = f"?[{self.sql(cond)};{value(when.args['true'])};{text}]"
+            text = f"?[{self.condition(cond)};{value(when.args['true'])};{text}]"
         return text
 
     def if_sql(self, node: exp.If) -> str:
         otherwise = node.args.get("false")
         if otherwise is None:
             return self.refuse("IF without an else value has no q form")
-        return f"?[{self.sql(node.this)};{self.sql(node.args['true'])};{self.sql(otherwise)}]"
+        return f"?[{self.condition(node.this)};{self.sql(node.args['true'])};{self.sql(otherwise)}]"
 
     def anonymous_sql(self, node: exp.Anonymous) -> str:
         word = self.FUNCTIONS.get(node.name.upper())
@@ -846,14 +873,22 @@ class QGenerator(Generator):
         tables = node.args.get("tables") or [node.this]
         return f"delete {','.join(self.table_sql(t) for t in tables)} from `."
 
+    def condition(self, node: exp.Expr) -> str:
+        """A condition where SQL keeps what is true: CASE WHEN, FILTER, HAVING."""
+        from sqlglot_q.truth import holds
+
+        text = holds(self, node)
+        return text
+
     def where(self, node: exp.Where | None) -> str:
         if node is None:
             return ""
         # A top-level AND is a q where list: each constraint filters what the
         # last one left, which for SQL's pure predicates is the same rows.
-        from sqlglot_q.query import conjuncts
+        from sqlglot_q.truth import holds
 
-        return " where " + ", ".join(self.sql(c) for c in conjuncts(node.this))
+        # Each constraint keeps the rows where it is true, as SQL's WHERE does.
+        return " where " + ", ".join(holds(self, c) for c in constraints(node.this))
 
 
 TEMPORAL = {
@@ -878,6 +913,51 @@ def xbar_width(node: exp.Expr) -> exp.Expr | None:
             floor.set("this", div)
         return node.expression
     return None
+
+
+NULL_SAFE = {exp.Sum: SUM, exp.Min: MIN, exp.Max: MAX}
+
+
+def floor_mod(node: exp.Mod):
+    """(x, y) when the node is ((x % y) + y) % y."""
+
+    def bare(n):
+        while isinstance(n, exp.Paren):
+            n = n.this
+        return n
+
+    outer_y = node.expression
+    add = bare(node.this)
+    if not isinstance(add, exp.Add) or add.expression != outer_y:
+        return None
+    inner = bare(add.this)
+    if isinstance(inner, exp.Mod) and inner.expression == outer_y:
+        return inner.this, outer_y
+    return None
+
+
+def constraints(node: exp.Expr) -> list[exp.Expr]:
+    """A condition as the list of what must all hold: an AND's sides, and,
+    by De Morgan, NOT (p OR q) as NOT p and NOT q. One spelling for one
+    condition, so it reads back the same."""
+    from sqlglot_q.query import conjuncts
+
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if isinstance(node, exp.And):
+        return [c for part in conjuncts(node) for c in constraints(part)]
+    if isinstance(node, exp.Not):
+        inner = node.this
+        while isinstance(inner, exp.Paren):
+            inner = inner.this
+        if isinstance(inner, exp.Or):
+            return [
+                *constraints(exp.Not(this=inner.this.copy())),
+                *constraints(exp.Not(this=inner.expression.copy())),
+            ]
+        if isinstance(inner, exp.Not):
+            return constraints(inner.this)
+    return [node]
 
 
 def atomic_literal(node: exp.Expr) -> bool:

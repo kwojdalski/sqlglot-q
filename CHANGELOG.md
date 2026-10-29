@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+Fixed, each found by running q against DuckDB on data with nulls, null join
+keys and one-row tables (`tests/integration/test_nulls.py`):
+
+- `WHERE a < 3`, `a <= 3`, `a <> 3`, `a = b` and `NOT (...)` kept null
+  rows: q has no unknown, and a null is its smallest value. Conditions in
+  `WHERE`, `HAVING`, `CASE WHEN` and `FILTER` now follow SQL's three-valued
+  logic (`truth.py`), guarding only the sides that need it.
+- `x NOT IN (..., NULL)` and `x NOT IN (SELECT ...)` over a null kept rows
+  SQL drops; `x IN (SELECT ...)` matched a null to a null.
+- `b NOT LIKE 'x%'` lost its NOT (sqlglot's `Like(negate=True)`).
+- `SUM` of no values was 0 and `MIN`/`MAX` were `0W`/`-0W`; SQL's are NULL.
+  `MIN`/`MAX` of text raised `'type`.
+- Joins paired up null keys (`0N=0N`).
+- `LENGTH(NULL)` was 0; `CAST('5' AS BIGINT)` raised `'type`; `-7 % 3` was 2.
+- Reading q: plain `sum x` is now `COALESCE(SUM(x), 0)` (q's sum of nothing
+  is 0); nested parentheses were not all removed when reading.
+- The test harness could not build a one-row table, or read q's `inf`.
+
 Aligned with sqlglot's dialect conventions:
 
 - `string_literals` is a dialect setting: `write="q, string_literals=string"`.

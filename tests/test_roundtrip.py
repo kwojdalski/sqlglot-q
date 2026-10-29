@@ -28,6 +28,8 @@ from sqlglot.errors import ParseError
 from tests.integration.harness import q_binary, run_duckdb, run_q, same
 from tests.integration.test_functions import DATA as FUNCTIONED
 from tests.integration.test_functions import QUERIES as FUNCTIONS
+from tests.integration.test_nulls import DATA as NULL_DATA
+from tests.integration.test_nulls import QUERIES as NULLS
 from tests.integration.test_queries import QUERIES, STATEMENTS, TABLES
 from tests.integration.test_sqlglot_native import DATA as NATIVE_DATA
 from tests.integration.test_sqlglot_native import QUERIES as NATIVE
@@ -71,6 +73,7 @@ SQL = (
     + [sql for sql, _ in FUNCTIONS]
     + [sql for sql, _ in NATIVE]
     + [sql for script in SCRIPTS for sql in script]
+    + NULLS
 )
 Q_EXAMPLES = statements(FIXTURES / "q_examples.q")
 Q_REFUSED = statements(FIXTURES / "q_refused.q")
@@ -91,6 +94,7 @@ SELECTS += TEMPORAL
 SELECTS += [(sql, "LIMIT" in sql) for sql in WINDOWS]
 SELECTS += FUNCTIONS
 SELECTS += NATIVE
+SELECTS += [(sql, "ORDER BY" in sql) for sql in NULLS]
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
@@ -105,6 +109,8 @@ def test_sql_read_back_from_q_means_the_same(sql, ordered):
         if (sql, ordered) in FUNCTIONS
         else NATIVE_DATA
         if (sql, ordered) in NATIVE
+        else NULL_DATA
+        if sql in NULLS
         else TABLES
     )
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back

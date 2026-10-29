@@ -10,15 +10,15 @@ sqlglot.transpile(
     "SELECT b, SUM(a) AS s FROM t WHERE c > 1 GROUP BY b ORDER BY s DESC LIMIT 5",
     write="q",
 )
-# ['5 sublist (`s xdesc (0!select s:sum a by b from t where c>1))']
+# ['5 sublist (`s xdesc (0!select s:sum {$[all null x;x 0N;x]} a by b from t where c>1))']
 ```
 
 The dialect is registered through sqlglot's `sqlglot.dialects` entry point as
 `q` and as `kdb`, so no import is needed. It also reads qSQL back into SQL:
 
 ```python
-sqlglot.parse_one("select s:sum a by b from t where c>1", read="q").sql()
-# 'SELECT b, SUM(a) AS s FROM t WHERE c > 1 GROUP BY b'
+sqlglot.parse_one("select s:avg a by b from t where c>1", read="q").sql()
+# 'SELECT b, AVG(a) AS s FROM t WHERE c > 1 GROUP BY b'
 ```
 
 The reader covers qSQL queries and statements, the q the writer produces and
@@ -103,7 +103,9 @@ sqlglot.transpile(
 ```
 
 Every construct is checked by running its q in q 5 and its SQL in DuckDB on
-the same tables. Where q and SQL disagree (rounding, null counting, `LIMIT`
+the same tables, including on nulls: SQL's three-valued logic (`a < 3` is
+unknown for a null `a`, where q's null is its smallest value) and its NULL
+aggregates are carried over, so `WHERE a < 3` does not return the null rows. Where q and SQL disagree (rounding, null counting, `LIMIT`
 past the end, precedence), the q is written to give SQL's answer;
 [docs/design.md](docs/design.md) lists each case. Anything without a faithful
 q form raises `UnsupportedError` rather than producing approximate q.

@@ -178,7 +178,10 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
             raise Refused("DISTINCT inside a window aggregate has no q form here")
         arg = gen.sql(fn.this)
         if frame == "whole":
-            return f"{WHOLE[type(fn)]} {arg}", False, False
+            from sqlglot_q.generator import NULL_SAFE
+
+            word = NULL_SAFE.get(type(fn), WHOLE[type(fn)])
+            return f"{word} {arg}", False, False
         if frame in ("range", "rows"):
             return f"{RUNNING[type(fn)]} {arg}", frame == "range", True
         return f"{frame} {MOVING[type(fn)]} {arg}", False, True
