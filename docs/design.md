@@ -30,6 +30,34 @@ Each of these was measured in q 5 and is pinned by `tests/integration`.
 | `x.y` qualifier | | q columns are unqualified | `y` |
 | alias `"p.0"` | `p.0:...` | not a name q can write in a select | placeholder, then `` `p.0 xcol `` |
 
+## Reading q
+
+`parser.py` reads qSQL into sqlglot's tree. It is the generator run
+backwards, plus the hand-written shapes of the same queries (a keyed
+`select ... by`, `` `a xasc t ``, `sym=`x`), and it refuses what it cannot
+state faithfully:
+
+| q | Why it is refused |
+|---|---|
+| `s.city`, `` `.ns.t `` | a foreign-key lookup or a namespace in q, `table.column` in SQL |
+| `x in z` | tests against z's items; SQL's `IN (z)` against z |
+| `sym="EUR"` | `=` on a string compares characters; SQL equality is `~\:` |
+| `where px:1` | an assignment, not a condition |
+| `update ... from t`, `delete c from t` | return a new table; SQL's change one |
+| a q keyword as a name | the writer could not name it back |
+
+## Round trips
+
+Both directions put the tree through `canonical.py` first: q's parentheses
+are dropped (the tree holds the grouping) and every compound operand is
+parenthesised one way. sqlglot prints a tree without adding parentheses for
+precedence, so without this q's `a*b+c` (which is `a*(b+c)`) would read back
+as SQL's `a * b + c`. With it, SQL -> q -> SQL -> q gives the same q twice
+and q -> SQL -> q -> SQL the same SQL twice, which `tests/test_roundtrip.py`
+checks over every test query and over qSQL from q-lint's showcase and the
+public q corpus. The first trip may normalise (a keyed `select ... by`
+becomes `0!select ... by`); the second must not.
+
 ## Known gaps
 
 - Joins must be on equality of same-named columns. `LEFT JOIN` is `lj`,
@@ -38,6 +66,8 @@ Each of these was measured in q 5 and is pinned by `tests/integration`.
 - `UNION` matches columns by name in q and by position in SQL.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.
+- `ORDER BY` reads back from q as nulls first, q's order; the writer does
+  not change q's null order to match a SQL `NULLS LAST`.
 - CTEs are inlined, so a CTE used twice is computed twice. Recursive CTEs,
   window functions, `FULL`/`RIGHT` joins and correlated subqueries are
   refused.

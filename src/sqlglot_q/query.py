@@ -249,15 +249,19 @@ def grouped(
     # alias it has in the select list, or a made-up one.
     key_names = []
     for i, (key, expr) in enumerate(zip(keys, key_exprs, strict=True)):
+        # The name the select list gives the key wins over its own: SELECT
+        # pid AS id ... GROUP BY pid has a column id.
+        alias = next(
+            (it.alias for it in items if isinstance(it, exp.Alias) and it.this == expr), None
+        )
         if isinstance(key, exp.Alias):
             key_names.append(key.alias)
+        elif alias:
+            key_names.append(alias)
         elif isinstance(expr, exp.Column):
             key_names.append(expr.name)
         else:
-            alias = next(
-                (it.alias for it in items if isinstance(it, exp.Alias) and it.this == expr), None
-            )
-            key_names.append(alias or f"k{i}")
+            key_names.append(f"k{i}")
 
     # Each select item is either a by key, which q puts in the result itself,
     # or a column computed per group.

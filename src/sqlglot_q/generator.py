@@ -124,6 +124,13 @@ class QGenerator(Generator):
         self.symbols = string_literals == "symbol"
         self.depth = 0
 
+    def preprocess(self, expression: exp.Expr) -> exp.Expr:
+        from sqlglot_q.canonical import canonical
+
+        # The tree's grouping in one spelling, so the q written for (a > 2)
+        # and for a > 2 is the same text, as it is the same query.
+        return canonical(super().preprocess(expression))
+
     # Dispatch -------------------------------------------------------------
 
     def sql(self, expression, key=None, comment=True) -> str:
@@ -444,6 +451,10 @@ class QGenerator(Generator):
 
     def q_create(self, node: exp.Create) -> str:
         schema = node.this
+        query = node.expression
+        if node.args.get("kind") == "TABLE" and isinstance(schema, exp.Table) and query:
+            # CREATE TABLE t AS SELECT ...: q names the result.
+            return f"{self.q_table(schema)}:{self.sql(query)}"
         if node.args.get("kind") != "TABLE" or not isinstance(schema, exp.Schema):
             return self.refuse("CREATE is only translated for CREATE TABLE with columns")
         cols = []

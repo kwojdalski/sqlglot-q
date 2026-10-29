@@ -14,7 +14,18 @@ sqlglot.transpile(
 ```
 
 The dialect is registered through sqlglot's `sqlglot.dialects` entry point as
-`q` and as `kdb`, so no import is needed. It writes q; it does not read it.
+`q` and as `kdb`, so no import is needed. It also reads qSQL back into SQL:
+
+```python
+sqlglot.parse_one("select s:sum a by b from t where c>1", read="q").sql()
+# 'SELECT b, SUM(a) AS s FROM t WHERE c > 1 GROUP BY b'
+```
+
+The reader covers qSQL queries and statements, the q the writer produces and
+the common hand-written shapes of the same thing. q with no faithful SQL form
+(foreign-key lookups like `s.city`, `x in z` against a variable, `=` on a
+string, lambdas) is a `ParseError`, never a guess. Converting both ways and
+back settles: after one round trip, another changes nothing.
 
 ## Install
 

@@ -1,20 +1,24 @@
-"""The q dialect: a sqlglot Dialect whose generator writes q.
+"""The q dialect: a sqlglot Dialect that writes q, and reads the qSQL it writes.
 
-It is write-only. Reading q is a different problem - q has no grammar a SQL
-tokenizer can approximate - so `read="q"` is refused rather than guessed at.
+Writing is the generator (generator.py). Reading is its own small parser
+(parser.py), because q has no grammar a SQL tokenizer can approximate; it
+reads qSQL queries and statements and refuses the rest of q.
 """
 
 from __future__ import annotations
 
-from sqlglot import parser
+from sqlglot import exp
 from sqlglot.dialects.dialect import Dialect
 
 from sqlglot_q.generator import QGenerator
+from sqlglot_q.parser import QParser
 
 
 class Q(Dialect):
     Generator = QGenerator
 
-    class Parser(parser.Parser):
-        def parse(self, raw_tokens, sql=None):
-            raise NotImplementedError("the q dialect writes q; it does not read it")
+    def parse(self, sql: str, **opts) -> list[exp.Expr | None]:
+        return QParser(**opts).parse(sql)
+
+    def parse_into(self, expression_type, sql: str, **opts) -> list[exp.Expr | None]:
+        return self.parse(sql, **opts)

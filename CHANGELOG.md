@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+Added:
+
+- Reading qSQL: `sqlglot.parse_one(q, read="q")`. Covers what the writer
+  emits and the common hand-written forms; refuses q with no faithful SQL.
+- `tests/test_roundtrip.py`: SQL -> q -> SQL -> q and q -> SQL -> q -> SQL
+  settle after one round, mean the same (DuckDB and q check), and give the
+  same output under any hash seed. Examples come from q-lint's showcase and
+  the public q corpus.
+
+Fixed, found by those round trips:
+
+- `SELECT pid AS id ... GROUP BY pid` lost the alias `id` in q.
+
 Fixed, each found by running the translation in q against DuckDB:
 
 - A scalar subquery (`WHERE a > (SELECT AVG(a) FROM t)`) compared against a

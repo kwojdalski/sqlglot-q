@@ -31,9 +31,11 @@ class TestRegistration(Validator):
         for name in ("q", "kdb"):
             self.assertIs(sqlglot.Dialect.get_or_raise(name).__class__, Q)
 
-    def test_reading_q_is_refused(self):
-        with pytest.raises(NotImplementedError):
-            sqlglot.parse_one("select from t", read="q")
+    def test_reading_qsql(self):
+        # The reader is tests/test_roundtrip.py's subject; this is the hookup.
+        self.assertEqual(sqlglot.parse_one("select a from t", read="q").sql(), "SELECT a FROM t")
+        with pytest.raises(sqlglot.errors.ParseError):
+            sqlglot.parse_one("{x+1}", read="q")
 
 
 class TestSelect(Validator):
