@@ -20,8 +20,26 @@ Fixed, where q answered something other than SQL with no error
 - `UNION` of differently named columns raised `'mismatch`.
 - Reading q: `s like "a_x"` read as SQL `LIKE 'a_x'`, where `_` is any
   character; it is now escaped.
+- `DATE_TRUNC('quarter', d)` of a NULL date was 2000-01-01 (`3 xbar 0Nm`
+  is `2000.01m`).
+- `CAST(2.5 AS INTEGER)` was 2: a literal `2.5` is a DECIMAL, which SQL
+  casts half away from zero (a DOUBLE column is still cast half even).
+- In string mode, `CONCAT(w, '-', v)` and `w || '-' || v` raised `'length`:
+  q read `w,\:"-",'v` right to left, joining `"-"` to `v` first.
+- `CONCAT(s, NULL)` raised `'length`; a NULL adds nothing to it. `s || NULL`
+  is refused.
 
 Added, each checked in q 5 against DuckDB and round-tripped:
+
+- `x > ANY (SELECT ...)` and `x > ALL (SELECT ...)` (and `>=`, `<`, `<=`)
+  in `WHERE` and `HAVING`, as a comparison with the subquery's `MIN` or
+  `MAX`; `ALL` is true over no rows and never over a NULL.
+- An inner join's `ON` beyond its key equalities (`ON t.g = u.g AND t.n >
+  2`) is a filter after the join, and `FROM t, u WHERE t.g = u.g` is the
+  join on `g`.
+- `TRIM`, `LTRIM` and `RTRIM` of given characters, `SPLIT_PART` and
+  `ASCII`, in both string modes; `CURRENT_DATE` and `CURRENT_TIMESTAMP` as
+  `.z.D` and `.z.P`.
 
 - `scalars.py`, one table of q lambdas read both ways: `TRUNC`, `LPAD`,
   `RPAD`, `REPEAT`, `STRPOS`/`POSITION`/`INSTR`, `LAST_DAY`, `MAKE_DATE`,

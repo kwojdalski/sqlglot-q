@@ -83,7 +83,6 @@ def test_q_returns_what_duckdb_returns(answers, sql, ordered):
 REFUSED = [
     "SELECT * FROM t FULL JOIN u ON t.a = u.k",
     "SELECT * FROM t JOIN u ON a = k",
-    "SELECT TRIM('x' FROM s) FROM t",
     "SELECT COUNT(d) FILTER (WHERE a > 1) FROM t",
     "SELECT CONCAT(b, ' ') FROM t",
 ]

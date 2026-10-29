@@ -168,7 +168,7 @@ TOKEN = re.compile(
   | (?P<bool>[01]+b(?![A-Za-z0-9_]))
   | (?P<num>0[NnWw][a-z]?|\d+(?:\.\d*)?(?:e[+-]?\d+)?[a-z]?|\.\d+(?:e[+-]?\d+)?[a-z]?)
   | (?P<sym>(?:`[A-Za-z0-9_.:]*)+)
-  | (?P<name>[A-Za-z][A-Za-z0-9_.]*)
+  | (?P<name>\.z\.[DP](?![A-Za-z0-9_.])|[A-Za-z][A-Za-z0-9_.]*)
   | (?P<op>~\\:|~'|,'|,\\:|,/:|=/:|<>|<=|>=|[=<>+\-*%&|^#~,!@$?_])
   | (?P<punct>[()\[\];:])
     """,
@@ -446,6 +446,8 @@ class Statement:
     def word(self, word: str, stop: set[str]) -> exp.Expr:
         if word in QUERY_WORDS:
             return self.query(word, stop)
+        if word in NOW:
+            return NOW[word]()
         if word == "ej" and self.is_("["):
             return self.equijoin()
         if word == "aj" and self.is_("["):
@@ -1881,6 +1883,8 @@ def nullable_side(node: exp.Expr) -> bool:
 
 
 PART_LAMBDAS = {DOW: "DOW", DOY: "DOY", QUARTER: "QUARTER", MILLISECOND: "MILLISECOND"}
+# The local date and time, as SQL's CURRENT_DATE and CURRENT_TIMESTAMP.
+NOW = {".z.D": exp.CurrentDate, ".z.P": exp.CurrentTimestamp}
 TRUNC_LAMBDAS = {text: unit for unit, text in TRUNC.items()}
 
 

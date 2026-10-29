@@ -230,13 +230,19 @@ becomes `0!select ... by`); the second must not.
 - `CAST(x AS VARCHAR)` of a timestamp is q's text, `2024.01.31D10:00:...`.
 - `MODE`, `ARG_MAX` and `ARG_MIN` break ties by the first row in q; DuckDB's
   choice among ties is its own.
-- `ORDER BY` an expression that is not a select item, `> ALL`/`< ANY`, the
-  `ALL` set operations and `BOOL_AND`/`BOOL_OR` (a NULL boolean) are
-  refused.
+- `ORDER BY` an expression that is not a select item, the `ALL` set
+  operations and `BOOL_AND`/`BOOL_OR` (a NULL boolean) are refused, and so
+  are `> ALL`/`< ANY` under a `NOT` or outside a `WHERE`/`HAVING`, where
+  their false and unknown differ from the `MIN`/`MAX` comparison's.
+- An outer join's `ON` is only its key equalities; an inner join's other
+  conditions filter after the join.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.
 - `ORDER BY` reads back from q as nulls first, q's order; the writer does
   not change q's null order to match a SQL `NULLS LAST`.
 - CTEs are inlined, so a CTE used twice is computed twice. Recursive CTEs,
-  window functions, `FULL` joins and correlated subqueries other than
+  `FULL` joins, a window over a grouped result, frames that reach ahead
+  (`1 FOLLOWING`) and correlated subqueries other than
   `EXISTS (... WHERE inner.k = outer.k ...)` are refused.
+- `CURRENT_DATE` and `CURRENT_TIMESTAMP` are the q process's local clock
+  (`.z.D`, `.z.P`), not the SQL session's time zone.

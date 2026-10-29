@@ -98,6 +98,37 @@ CALLS = [
         keys=("this", "expression"),
         fixed={"unit": "YEAR"},
     ),
+    # TRIM(s, 'ab'), LTRIM, RTRIM: any of the characters, off either end.
+    *(
+        Call(
+            exp.Trim,
+            f"{{`${{{body}}}[;y] each string x}}",
+            f"{{{{{body}}}[;y] each x}}",
+            keys=("this", "expression"),
+            chars=("expression",),
+            fixed={"position": position},
+        )
+        for position, body in (
+            ("LEADING", "(sum mins x in y)_x"),
+            ("TRAILING", "neg[sum mins reverse x in y]_x"),
+            ("BOTH", "a:(sum mins x in y)_x;neg[sum mins reverse a in y]_a"),
+            (None, "a:(sum mins x in y)_x;neg[sum mins reverse a in y]_a"),
+        )
+    ),
+    # SPLIT_PART: the part from 1, or from the end when negative; '' past it.
+    Call(
+        exp.SplitPart,
+        '{`${p:y vs x;i:$[z<0;z+count p;z-1];$[i within 0,-1+count p;p i;""]}[;y;z] each string x}',
+        '{{p:y vs x;i:$[z<0;z+count p;z-1];$[i within 0,-1+count p;p i;""]}[;y;z] each x}',
+        keys=("this", "delimiter", "part_index"),
+        chars=("delimiter",),
+    ),
+    # ASCII: the first character's code, 0 for ''.
+    Call(
+        exp.Ascii,
+        "{?[null x;0N;{$[count x;`long$first x;0]} each string x]}",
+        "{{$[count x;`long$first x;0N]} each x}",
+    ),
     # Aggregates, each over the non-null values and NULL over none.
     Call(
         exp.ArgMax,
@@ -140,7 +171,14 @@ def unit_of(node: exp.Expr) -> str:
 
 def matches(call: Call, node: exp.Expr) -> bool:
     for key, value in call.fixed.items():
-        have = unit_of(node) if key == "unit" else bool(node.args.get(key))
+        if key == "unit":
+            have = unit_of(node)
+        elif isinstance(value, bool):
+            have = bool(node.args.get(key))
+        else:
+            # A word (TRIM's position), or None: the argument absent.
+            have = node.args.get(key)
+            have = str(have).upper() if have else None
         if have != value:
             return False
     if not all(node.args.get(k) is not None for k in call.keys):
@@ -181,5 +219,6 @@ def read(call: Call, args: list[exp.Expr]) -> exp.Expr | None:
         return None
     values = dict(zip(call.keys, args, strict=True))
     for key, value in call.fixed.items():
-        values[key] = exp.var(value) if key == "unit" else value
+        if value is not None:
+            values[key] = exp.var(value) if key == "unit" else value
     return call.kind(**values)

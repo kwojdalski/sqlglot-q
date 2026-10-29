@@ -110,7 +110,8 @@ QUARTER = "{1+((`mm$x)-1) div 3}"
 MILLISECOND = "{((`ss$x)*1000)+((`long$x) mod 1000000000) div 1000000}"
 TRUNC = {
     "MONTH": "{`timestamp$`date$`month$x}",
-    "QUARTER": "{`timestamp$`date$3 xbar `month$x}",
+    # 3 xbar 0Nm is 2000.01m: a null is kept out of the bucket.
+    "QUARTER": "{?[null x;0Np;`timestamp$`date$3 xbar `month$x]}",
     "YEAR": "{`timestamp$`date$`month$12*(`year$x)-2000}",
     "WEEK": "{`timestamp$`week$x}",  # the Monday, as SQL
 }
@@ -196,7 +197,18 @@ def atomic(node: exp.Expr) -> bool:
         return True  # DATE '...' is a q date literal
     # A subquery prints parenthesised already (q_subquery).
     return isinstance(
-        node, (exp.Column, exp.Literal, exp.Null, exp.Boolean, exp.Paren, exp.Subquery, exp.Pi)
+        node,
+        (
+            exp.Column,
+            exp.Literal,
+            exp.Null,
+            exp.Boolean,
+            exp.Paren,
+            exp.Subquery,
+            exp.Pi,
+            exp.CurrentDate,
+            exp.CurrentTimestamp,
+        ),
     )
 
 
@@ -706,6 +718,12 @@ class QGenerator(Generator):
         return self.refuse(f"{agg.sql()} FILTER (...) has no q translation here")
 
     def trim_sql(self, node: exp.Trim) -> str:
+        if node.expression is not None and not node.args.get("collation"):
+            from sqlglot_q import scalars
+
+            call = scalars.find(node)
+            if call is not None:
+                return scalars.write(self, node, call)
         if node.expression is not None or node.args.get("collation"):
             return self.refuse("TRIM of characters other than spaces has no q translation here")
         word = {"LEADING": "ltrim", "TRAILING": "rtrim"}.get(
@@ -718,6 +736,8 @@ class QGenerator(Generator):
         return self.joined([node.this, *node.expressions] if node.this else node.expressions)
 
     def dpipe_sql(self, node: exp.DPipe) -> str:
+        if any(isinstance(p, exp.Null) for p in flatten_dpipe(node)):
+            return self.refuse("x || NULL is NULL on every row: write NULL")
         text = self.joined(flatten_dpipe(node))
         columns = []
         for part in flatten_dpipe(node):
@@ -740,6 +760,9 @@ class QGenerator(Generator):
         """Text parts joined row by row: ,' between two columns, ,\\: and ,/:
         where one side is a literal, so a literal string is not paired item
         by item with the rows."""
+        # A NULL adds nothing to CONCAT, and || is guarded on it: its text is
+        # the empty one, where string 0N would be paired with the rows.
+        parts = [exp.Literal.string("") if isinstance(p, exp.Null) else p for p in parts]
         pieces = []
         for part in parts:
             if isinstance(part, exp.Literal) and part.is_string:
@@ -762,8 +785,9 @@ class QGenerator(Generator):
                         'string_literals="string"'
                     )
         text, atom = pieces[0]
-        for piece, lit in pieces[1:]:
-            left = text if " " not in text else f"({text})"
+        for n, (piece, lit) in enumerate(pieces[1:]):
+            # q reads right to left: a,\:"-",'b would join "-" to b first.
+            left = text if " " not in text and not n else f"({text})"
             right = piece if " " not in piece else f"({piece})"
             glyph = "," if atom and lit else ",\\:" if lit else ",/:" if atom else ",'"
             text, atom = f"{left}{glyph}{right}", atom and lit
@@ -807,6 +831,12 @@ class QGenerator(Generator):
         if kind not in TYPES:
             return self.refuse(f"CAST to {node.to.sql()} has no q type here")
         name = TYPES[kind][0]
+        literal = node.this.this if isinstance(node.this, exp.Neg) else node.this
+        if name in INTEGERS and isinstance(literal, exp.Literal) and not literal.is_string:
+            # 2.5 is a DECIMAL, which SQL casts rounding half away from
+            # zero, as q's `long$ does (2.5e0, a DOUBLE, is cast half even).
+            if "e" not in literal.this.lower():
+                return f"`{name}${arg}"
         if name in INTEGERS:
             # SQL casts a float to an integer rounding half to even (2.5 is 2,
             # 3.5 is 4); q's `long$ rounds half away from zero (2.5 is 3).
@@ -1340,7 +1370,12 @@ def qtext(self, node) -> str:
 def _select_rewrites():
     from sqlglot import transforms
 
-    from sqlglot_q.rewrites import expand_group_by_all, q_names, quantified_in
+    from sqlglot_q.rewrites import (
+        expand_group_by_all,
+        join_conditions,
+        q_names,
+        quantified_in,
+    )
 
     # sqlglot's own rewrites, as its dialects use them: QUALIFY and DISTINCT
     # ON become a window in a subquery, which the window stages translate.
@@ -1350,6 +1385,7 @@ def _select_rewrites():
             transforms.eliminate_distinct_on,
             expand_group_by_all,
             quantified_in,
+            join_conditions,
             q_names,
         ]
     )
@@ -1373,8 +1409,11 @@ def scalar(self, node: exp.Expr) -> str:
 QGenerator.TRANSFORMS = {
     QText: qtext,
     exp.Pi: lambda self, node: "3.141592653589793",
+    # The local date and time: .z.d and .z.p are UTC's.
+    exp.CurrentDate: lambda self, node: ".z.D",
+    exp.CurrentTimestamp: lambda self, node: ".z.P",
     # The functions in scalars.py, each a q lambda.
-    **{call.kind: scalar for call in _scalar_calls() if call.kind is not exp.DateDiff},
+    **{call.kind: scalar for call in _scalar_calls() if call.kind not in (exp.DateDiff, exp.Trim)},
     exp.Select: _select_rewrites(),
     # Statistics. q's med counts a null as the smallest value; SQL's MEDIAN
     # skips it. sdev, dev, svar and var skip nulls as SQL does.

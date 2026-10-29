@@ -52,6 +52,11 @@ QUERIES = [
     "SELECT MODE(w) AS m, ARG_MAX(w, a) AS x, ARG_MIN(a, w) AS n FROM s",
     "SELECT a, CAST(a AS VARCHAR) AS c, CAST(a > 2 AS VARCHAR) AS b FROM s",
     "SELECT a FROM s WHERE w LIKE 'a\\_%' ESCAPE '\\'",
+    "SELECT a, LTRIM(w, 'a') AS l, RTRIM(w, 'cz') AS r, TRIM(w, 'ab') AS t FROM s",
+    "SELECT a, SPLIT_PART(w, 'b', 1) AS p, SPLIT_PART(w, 'b', -1) AS q FROM s",
+    "SELECT a, ASCII(w) AS c, CONCAT(w, NULL, v) AS d FROM s",
+    # q reads right to left: a three-part join is parenthesised on the left.
+    "SELECT a, CONCAT(w, '-', v) AS c, w || '-' || v AS d FROM s",
 ]
 
 

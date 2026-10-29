@@ -94,6 +94,29 @@ QUERIES = [
     "SELECT a, v FROM t2 LEFT JOIN u ON t2.a = u.v",
     "SELECT g, n, v FROM t LEFT JOIN u USING (g)",
     "SELECT t.g, n, u.g AS h FROM t JOIN u ON t.g = u.g",
+    # More of an inner join's ON is a filter; FROM t, u WHERE t.k = u.k a join.
+    "SELECT t.g, n, v FROM t JOIN u ON t.g = u.g AND t.n > 2",
+    "SELECT t.g, n, v FROM t JOIN u ON u.g = t.g AND t.o < u.v WHERE n > 0",
+    "SELECT t.g, u.v FROM t, u WHERE t.g = u.g AND n > 2",
+    "SELECT a, w, v FROM t2, u WHERE t2.a = u.v",
+    # > ANY and > ALL: above the least, or above every value with no NULL.
+    "SELECT g, n FROM t WHERE n > ANY (SELECT v / 4 FROM u)",
+    "SELECT g, n FROM t WHERE n < ANY (SELECT o FROM t WHERE g = 'a')",
+    "SELECT g, n FROM t WHERE n >= ALL (SELECT o FROM t)",
+    "SELECT g, n FROM t WHERE n > ALL (SELECT n FROM t WHERE g = 'b')",
+    "SELECT g, n FROM t WHERE n > ALL (SELECT v FROM u WHERE v > 100)",
+    "SELECT g, n FROM t WHERE n <= ALL (SELECT o FROM t WHERE o > 1) OR g = 'c'",
+    # A NULL adds nothing to CONCAT; 3 xbar of a null month is 2000.01m.
+    "SELECT CONCAT(s, NULL) AS u, CONCAT(NULL, s, '-', g) AS w FROM t",
+    "SELECT DATE_TRUNC('quarter', d) AS c FROM t",
+    # 2.5 is a DECIMAL, cast half away from zero; a DOUBLE column half even.
+    "SELECT CAST(-2.5 AS INTEGER) AS a, CAST(2.5 AS INTEGER) AS b, CAST(x AS INTEGER) AS c FROM t",
+    "SELECT LTRIM(s, 'ab') AS a, RTRIM(s, 'zq') AS b, TRIM(s, 'a') AS c FROM t",
+    "SELECT TRIM(BOTH 'xz' FROM s) AS c FROM t",
+    "SELECT SPLIT_PART(s, '_', 1) AS a, SPLIT_PART(s, '_', -1) AS b, "
+    "SPLIT_PART(s, 'b', 3) AS c FROM t",
+    "SELECT ASCII(s) AS a FROM t",
+    "SELECT g, n FROM t WHERE d < CURRENT_DATE AND CURRENT_TIMESTAMP > d",
 ]
 
 
@@ -123,7 +146,8 @@ REFUSED = [
     "SELECT t.g, n, u.g AS h FROM t LEFT JOIN u ON t.g = u.g",
     "SELECT t.g, n, v FROM t RIGHT JOIN u ON t.g = u.g",
     "SELECT g FROM t INTERSECT ALL SELECT g FROM u",
-    "SELECT g, n FROM t WHERE n > ALL (SELECT v FROM u)",
+    "SELECT g, n FROM t WHERE NOT (n > ALL (SELECT v FROM u))",
+    "SELECT s || NULL AS u FROM t",
     "SELECT g, o FROM t ORDER BY ABS(n)",
     "SELECT TRUNC(x, 1) FROM t",
     "SELECT LPAD(s, 5) FROM t",
