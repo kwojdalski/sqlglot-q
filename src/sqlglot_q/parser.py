@@ -28,6 +28,8 @@ from sqlglot_q.generator import (
     DOY,
     HALF_EVEN,
     INT_DIV,
+    LAG_DEFAULT,
+    LEAD_DEFAULT,
     LEFT,
     LENGTH,
     MILLISECOND,
@@ -44,6 +46,8 @@ from sqlglot_q.generator import (
     RIGHT,
     ROUND,
     ROUND_TO,
+    RUNNING_SUM,
+    SIGN,
     SUBSTRING,
     SUBSTRING_FROM,
     TEXT_AGG,
@@ -110,6 +114,8 @@ KEYWORD_DYADS = {
     "xcol",
     "insert",
     "upsert",
+    "wavg",
+    "wsum",
     "xbar",
     "xexp",
     "xlog",
@@ -125,7 +131,7 @@ STATISTICS = {
     "var": exp.VariancePop,
 }
 MONADS = (
-    {"signum", "trim", "ltrim", "rtrim", "med", "any", "asc"}
+    {"signum", "trim", "ltrim", "rtrim", "med", "any", "asc", "deltas", "prev", "next"}
     | set(STATISTICS)
     | WINDOW_MONADS
     | {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
@@ -321,7 +327,9 @@ class Statement:
             self.fail(f"unexpected {self.peek().text!r}")
         if isinstance(node, TableLiteral):
             node = no_from(self, node)
-        node = canonical(node.transform(literal))
+        from sqlglot_q.qnulls import faithful
+
+        node = canonical(faithful(node.transform(literal)))
         leftover = node.find(*HELPERS) if not isinstance(node, HELPERS) else node
         if leftover is not None:
             self.fail(f"{type(leftover).__name__.lower()} has no SQL form here")
@@ -521,15 +529,30 @@ class Statement:
                 return exp.Filter(this=agg, expression=exp.Where(this=arg.expression.this))
             return AGGREGATES[word](this=arg)
         if word == "signum":
-            return exp.Sign(this=arg)
+            # q's signum of a null is -1 (a null is below zero); SQL's SIGN is NULL
+            minus = exp.Neg(this=exp.Literal.number(1))
+            null = exp.Is(this=arg.copy(), expression=exp.Null())
+            return exp.Case(ifs=[exp.If(this=null, true=minus)], default=exp.Sign(this=arg))
+        if word in ("deltas", "prev", "next"):
+            if word == "deltas":
+                # deltas keeps the first value: x - LAG(x, 1, 0)
+                return exp.Sub(this=arg, expression=QCall(this=arg.copy(), fn="lag0"))
+            n = exp.Literal.number(1) if word == "prev" else exp.Neg(this=exp.Literal.number(1))
+            return QCall(this=arg, fn="xprev", n=n)
         if word in ("trim", "ltrim", "rtrim"):
             inner = arg.this if isinstance(arg, exp.Cast) else arg
             position = {"ltrim": "LEADING", "rtrim": "TRAILING"}.get(word)
             return exp.Trim(this=inner, position=position)
         if word in MONADIC:
             return MONADIC[word](this=arg)
+        if word == "sums" and not isinstance(arg, QCall):
+            # q's sums of a leading run of nulls is 0; SQL's running SUM, NULL.
+            running = QCall(this=arg, fn="sums")
+            return exp.Coalesce(this=running, expressions=[exp.Literal.number(0)])
         if word in WINDOW_MONADS or word == "asc":
             return QCall(this=arg, fn=word)
+        if word == "count" and isinstance(bare(arg), exp.Column) and bare(arg).name != "i":
+            return exp.Count(this=exp.Star())  # count x is the rows, nulls and all
         if word == "count" and is_query(arg):
             return CountRows(this=arg)
         if word == "count":
@@ -688,6 +711,21 @@ class Statement:
             y = self.expr(set())
             self.expect("]")
             return exp.Mod(this=x, expression=y)
+        if text == RUNNING_SUM:
+            return QCall(this=self.expr(stop), fn="sums")
+        if text == SIGN:
+            return exp.Sign(this=self.expr(stop))
+        if text in (LAG_DEFAULT, LEAD_DEFAULT):
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            if len(args) != 3:
+                self.fail("a lambda with the wrong arguments")
+            fn = "lagd" if text == LAG_DEFAULT else "leadd"
+            return QCall(this=args[0], fn=fn, n=args[1], default=literal(args[2]))
         if text in (*LEFT, *RIGHT):
             self.expect("[")
             n = self.expr(set())
@@ -825,9 +863,10 @@ class Statement:
             # = and <> are SQL's plain ones.
             right = bare(right)
             if isinstance(right, exp.NullSafeEQ):
-                return exp.EQ(this=right.this, expression=right.expression)
-            if isinstance(right, exp.NullSafeNEQ):
-                return exp.NEQ(this=right.this, expression=right.expression)
+                right = exp.EQ(this=right.this, expression=right.expression)
+            elif isinstance(right, exp.NullSafeNEQ):
+                right = exp.NEQ(this=right.this, expression=right.expression)
+            right.meta["guarded"] = True
             return right
         if op in ("&", "and") and isinstance(bare(right), NoNulls):
             # (not x in S)&not any null S: SQL's x NOT IN (S)
@@ -861,6 +900,14 @@ class Statement:
             return EqEach(this=left, items=right.args["items"])
         if op == "xexp":
             return exp.Pow(this=left, expression=right)
+        if op in ("wavg", "wsum"):
+            # q drops a pair with a null on either side.
+            total = exp.Sum(this=exp.Mul(this=left, expression=right))
+            if op == "wsum":
+                return exp.Coalesce(this=total, expressions=[exp.Literal.number(0)])
+            known = exp.Not(this=exp.Is(this=right.copy(), expression=exp.Null()))
+            weight = exp.Case(ifs=[exp.If(this=known, true=left.copy())])
+            return exp.Div(this=total, expression=exp.Sum(this=weight))
         if op == "xlog":
             return exp.Log(this=left, expression=right)
         if op in ("cor", "cov", "scov"):
@@ -967,6 +1014,14 @@ class Statement:
             return self.update(stop)
         if word == "delete":
             return self.delete(stop)
+        limit = None
+        if word == "select" and self.is_("["):
+            # select[n]: the first n rows, SQL's LIMIT n.
+            self.next()
+            limit = self.expr(set())
+            self.expect("]")
+            if not (isinstance(limit, exp.Literal) and limit.this.isdigit()):
+                self.fail("select[n] is read with a count n >= 0; select[-n] takes the last rows")
         distinct = False
         if word == "select" and self.is_("distinct"):
             self.next()
@@ -982,7 +1037,11 @@ class Statement:
         if self.is_("where"):
             self.next()
             where = self.conditions(stop)
+        if where is not None:
+            where = scalar_aggregates(self, where, source)
         node = select(self, cols, keys, source, where, distinct)
+        if limit is not None:
+            node = with_modifier(node, limit=limit)
         if word == "exec":
             if keys or len(cols) != 1:
                 self.fail("exec is only read as the one column of a subquery")
@@ -1120,7 +1179,7 @@ class QCall(exp.Expression):
     """A q function with no SQL counterpart outside a window: sums, til,
     xprev, msum and so on. windows_read.py turns them into windows."""
 
-    arg_types = {"this": True, "fn": True, "n": False}
+    arg_types = {"this": True, "fn": True, "n": False, "default": False}
 
 
 class Renamed(exp.Expression):
@@ -1801,3 +1860,29 @@ def dpipe_of(cond, then, other):
     for p in other.expressions[1:]:
         node = exp.DPipe(this=node, expression=p, safe=True)
     return node
+
+
+def scalar_aggregates(parser, where: exp.Expr, source) -> exp.Expr:
+    """where x>avg x: in q the aggregate is over the rows the constraints
+    before it left; SQL's WHERE has no aggregates, so it is a subquery over
+    the same rows."""
+    parts, stack = [], [where]
+    while stack:
+        part = stack.pop()
+        if isinstance(part, exp.And):
+            stack += [part.expression, part.this]
+        else:
+            parts.append(part)
+    done = []
+    for part in parts:
+        aggs = [a for a in part.find_all(exp.AggFunc) if a.find_ancestor(exp.Select) is None]
+        if aggs:
+            table, _ = source_table(parser, source)
+            for agg in aggs:
+                sub = exp.Select(expressions=[agg.copy()])
+                sub.set("from_", exp.From(this=table.copy()))
+                if done:
+                    sub.set("where", exp.Where(this=conjunction([d.copy() for d in done])))
+                agg.replace(exp.Subquery(this=sub))
+        done.append(part)
+    return conjunction(done)

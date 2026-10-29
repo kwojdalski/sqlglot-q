@@ -84,7 +84,9 @@ SQL = (
     + MORE_NULLS
     + CALENDAR
 )
-Q_EXAMPLES = statements(FIXTURES / "q_examples.q")
+from tests.integration.test_reading import QUERIES as READING  # noqa: E402
+
+Q_EXAMPLES = statements(FIXTURES / "q_examples.q") + READING
 Q_REFUSED = statements(FIXTURES / "q_refused.q")
 
 

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+Fixed and added, each checked in q 5 against DuckDB and round-tripped:
+
+- String mode: null tests, ORDER BY, comparisons with text, MIN/MAX, CASE,
+  COALESCE, column = column, CONCAT, ||, LENGTH and STRING_AGG over q
+  strings (`tests/integration/test_string_mode.py`); it was largely broken.
+- IN over mixed numbers ('type in q); NTILE's bucket sizes; SIGN(NULL) (q's
+  signum of a null is -1); a running SUM over a leading run of nulls.
+- DATE_TRUNC to month/quarter/year; EXTRACT DOW/DOY/QUARTER/MILLISECOND;
+  DATE_DIFF in days; REPLACE, SUBSTRING, REVERSE; uncorrelated EXISTS;
+  FIRST_VALUE, LAST_VALUE, NTILE, PERCENT_RANK, CUME_DIST; LAG and LEAD
+  with a default.
+- Reading hand-written q: comparisons keep q's meaning on nulls (`where
+  n<3` keeps the null rows); select[n], count x, wavg, wsum, deltas, prev,
+  next, sums, signum and aggregates in a where phrase read as their SQL
+  (`tests/integration/test_reading.py`, which runs q against DuckDB).
+- Harness: durations compare as seconds; q string columns.
+
 Fixed, each found by running q against DuckDB on data with nulls, null join
 keys and one-row tables (`tests/integration/test_nulls.py`):
 

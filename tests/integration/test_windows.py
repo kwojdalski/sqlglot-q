@@ -46,6 +46,9 @@ QUERIES = [
     "SELECT g, o, f, LAG(f) OVER (PARTITION BY g ORDER BY o, f) AS p FROM w",
     "SELECT g, o, f, LEAD(f, 2) OVER (PARTITION BY g ORDER BY o, f) AS nx FROM w",
     "SELECT g, f - LAG(f) OVER (PARTITION BY g ORDER BY o, f) AS d FROM w",
+    # A default only past the partition's edge, not over x's own null.
+    "SELECT g, o, f, LAG(x, 1, 0) OVER (PARTITION BY g ORDER BY o, f) AS p FROM w",
+    "SELECT g, o, f, LEAD(f, 2, -1) OVER (PARTITION BY g ORDER BY o, f) AS nx FROM w",
     # Around the windows: WHERE runs first, ORDER BY and LIMIT after.
     "SELECT g, o, SUM(x) OVER (PARTITION BY g ORDER BY o) AS s FROM w WHERE o > 1",
     "SELECT *, ROW_NUMBER() OVER (PARTITION BY g ORDER BY o, f) AS rn FROM w",
@@ -69,7 +72,7 @@ def test_q_returns_what_duckdb_returns(answers, sql):
 
 
 REFUSED = [
-    "SELECT LAG(x, 1, 0) OVER (ORDER BY o) FROM w",
+    "SELECT LAG(x, o) OVER (ORDER BY o) FROM w",
     "SELECT SUM(x) OVER (ORDER BY o ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM w",
     "SELECT NTH_VALUE(x, 2) OVER (ORDER BY o) FROM w",
     "SELECT g, SUM(SUM(x)) OVER () FROM w GROUP BY g",

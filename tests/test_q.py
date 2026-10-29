@@ -271,13 +271,16 @@ class TestWindows(Validator):
         rows = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
         self.validate(
             f"SELECT SUM(x) OVER (PARTITION BY g ORDER BY o {rows}) AS s FROM t",
-            "select s from (update s:sums x by g from ({x iasc null x`o} (`o xasc t)))",
+            # sums of a leading run of nulls is 0; SQL's running SUM is NULL.
+            "select s from (update s:{?[0=sums not null x;x 0N;sums x]} x by g from "
+            "({x iasc null x`o} (`o xasc t)))",
         )
         # The default frame is RANGE: rows tied on o share the last value.
         # DuckDB sorts o's nulls last, q first: {x iasc null x`o} moves them.
         self.validate(
             "SELECT SUM(x) OVER (PARTITION BY g ORDER BY o NULLS FIRST) AS s FROM t",
-            "select s from (update s:last s by g,o from (update s:sums x by g from (`o xasc t)))",
+            "select s from (update s:last s by g,o from (update s:{?[0=sums not null x;x 0N;"
+            "sums x]} x by g from (`o xasc t)))",
         )
 
     def test_ranking_offsets_and_moving(self):
@@ -307,15 +310,16 @@ class TestWindows(Validator):
         )
 
     def test_reading_back(self):
+        # q's sums of nothing but nulls so far is 0, SQL's running SUM NULL.
         sql = sqlglot.parse_one("update s:sums x by g from `o xasc t", read="q").sql("duckdb")
         self.assertEqual(
             sql,
-            "SELECT *, SUM(x) OVER (PARTITION BY g ORDER BY o ASC NULLS FIRST "
-            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM t",
+            "SELECT *, COALESCE(SUM(x) OVER (PARTITION BY g ORDER BY o ASC NULLS FIRST "
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW), 0) AS s FROM t",
         )
 
     def test_refusals(self):
-        self.refuses("SELECT LAG(x, 1, 0) OVER (ORDER BY o) FROM t", "default")
+        self.refuses("SELECT LAG(x, o) OVER (ORDER BY o) FROM t", "literal offset")
         self.refuses(
             "SELECT SUM(x) OVER (ORDER BY o ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t",
             "current row",

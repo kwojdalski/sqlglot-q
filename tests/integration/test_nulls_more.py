@@ -40,6 +40,7 @@ DATA = {
 }
 
 QUERIES = [
+    "SELECT n, SIGN(n) AS s, SIGN(x - 30) AS t FROM t",
     "SELECT g, SUM(x) OVER (PARTITION BY g) AS s FROM t",
     "SELECT g, o, ROW_NUMBER() OVER (PARTITION BY g ORDER BY o) AS r FROM t",
     "SELECT g, o, RANK() OVER (ORDER BY o) AS r FROM t",

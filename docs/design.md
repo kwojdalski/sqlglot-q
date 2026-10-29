@@ -119,6 +119,35 @@ Aggregates and joins:
 Reading q back is the same table backwards: plain q `sum x` is
 `COALESCE(SUM(x), 0)`, and `x mod y` is `((x % y) + y) % y`.
 
+## Text as strings
+
+With `string_literals="string"` text is a list of char vectors, which q's
+null, sort, comparisons, `?[...]` and `^` do not treat as text: `null` tests
+each character, `asc` sorts element by element (`"b"` before `"abc"`),
+`"b"<"abc"` compares characters, and `?[...]` and `^` refuse strings. So:
+
+| SQL | q, string mode |
+|---|---|
+| `w IS NULL` | `{$[0h=type x;0=count each x;null x]} w`: q has no null string; the empty one stands for NULL |
+| `ORDER BY w`, `MIN(w)`, `MAX(w)` | sorted through symbols, `` {x iasc {$[0h=type x;`$x;x]} x`w} `` |
+| `w > 'b'` | `` (`$w)>`$"b" `` |
+| `w = v` | `w~'v` |
+| `CASE ... THEN 'B' ...`, `COALESCE(w, 'none')` | row by row: `{$[x;y;z]}'[...]`, `{$[0=count x;y;x]}'[...]` |
+| `CONCAT(w, v)`, `w || v` | `(w,'v)`: in parentheses, as a select phrase is cut at commas |
+
+## Reading q's comparisons
+
+q's comparisons are two-valued, SQL's three-valued. `qnulls.py` reads each
+comparison the generator did not guard as SQL that is never unknown and
+agrees with q: `where n<3` (which keeps the null rows) is `n < 3 OR n IS
+NULL`, a comparison as a value is `COALESCE(n > 2, FALSE)`, `not n>2` is `NOT
+COALESCE(n > 2, FALSE)`. q idioms with a SQL form read as it: `select[n]` is
+`LIMIT n`, `count x` is `COUNT(*)`, `x wavg y` drops pairs with a null,
+`wsum` and `sums` are 0 over no values, `deltas x` is `x - LAG(x, 1, 0)`,
+`signum` of a null is -1, and `where x>avg x` is a subquery over the rows the
+constraints before it left. `tests/integration/test_reading.py` runs the q in
+q and the SQL in DuckDB.
+
 ## Window functions
 
 SQL computes a select's windows after `WHERE` and before the projection,
@@ -192,6 +221,14 @@ becomes `0!select ... by`); the second must not.
 - `CAST(x AS VARCHAR)` of a float is q's `string`, which prints with q's
   display precision (7 significant digits by default) and drops a `.0`:
   `0.0` is `"0"` where SQL writes `'0.0'`.
+- q booleans cannot be null, so SQL's NULL booleans have no q form.
+- Reading q: plain `max x` and `min x` over no values are q's infinities,
+  which SQL cannot state without the column's type; running q functions
+  without a sort ahead of them (`update s:sums x by g from t`) depend on q's
+  row order and are refused; `count distinct x` counts a null as a value in q
+  and is refused; `fby` is not read.
+- q's moving functions (`msum`, `mavg`) treat a null as 0 or skip it where a
+  SQL frame of nothing but nulls is NULL.
 - `UNION` matches columns by name in q and by position in SQL.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.

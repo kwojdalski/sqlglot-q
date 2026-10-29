@@ -65,7 +65,6 @@ MONADIC = {
     exp.Sqrt: "sqrt",
     exp.Exp: "exp",
     exp.Ln: "log",
-    exp.Sign: "signum",
 }
 
 # Spelled as lambdas because q has no word for them; parser.py reads these
@@ -119,6 +118,13 @@ REPLACE = ("{`$ssr[;y;z] each string x}", "{ssr[;y;z] each x}")
 SUBSTRING = ("{`$sublist[(y-1;z)] each string x}", "{sublist[(y-1;z)] each x}")
 SUBSTRING_FROM = ("{`$(y-1)_' string x}", "{(y-1)_' x}")
 REVERSE = ("{`$reverse each string x}", "{reverse each x}")
+RUNNING_SUM = "{?[0=sums not null x;x 0N;sums x]}"
+# SIGN(NULL) is NULL; q's signum of a null is -1, a null being below zero.
+SIGN = "{?[null x;0Ni;signum x]}"
+# LAG/LEAD with a default: the default only past the partition's edge, in the
+# column's type (q refuses an amend of another type).
+LAG_DEFAULT = "{v:y xprev x;@[v;til y&count x;:;(abs type v)$z]}"
+LEAD_DEFAULT = "{v:neg[y] xprev x;@[v;(count x)-1+til y&count x;:;(abs type v)$z]}"
 # Window functions with no q word, applied to a stage's rows (windows.py).
 # NTILE as SQL defines it: the first n mod k buckets get the extra rows.
 NTILE = "{n:count y;s:n div x;r:n mod x;j:til n;1+?[j<r*s+1;j div s+1;r+(j-r*s+1) div s]}"
@@ -570,9 +576,10 @@ class QGenerator(Generator):
     def monadic(self, node: exp.Expr) -> str:
         return f"{MONADIC[type(node)]} {self.sql(node.this)}"
 
-    abs_sql = upper_sql = lower_sql = floor_sql = ceil_sql = sqrt_sql = exp_sql = ln_sql = (
-        sign_sql
-    ) = monadic
+    def sign_sql(self, node) -> str:
+        return f"{SIGN} {self.operand(node.this)}"
+
+    abs_sql = upper_sql = lower_sql = floor_sql = ceil_sql = sqrt_sql = exp_sql = ln_sql = monadic
 
     def round_sql(self, node: exp.Round) -> str:
         places = node.args.get("decimals")
@@ -701,6 +708,10 @@ class QGenerator(Generator):
     def coalesce_sql(self, node: exp.Coalesce) -> str:
         # x^y is y with its nulls filled from x, so the first argument goes last.
         items = [node.this, *node.expressions]
+        q_like = q_comparison(node)
+        if q_like is not None:
+            # COALESCE(n > 3, FALSE) is what q's n>3 is, nulls and all.
+            return self.sql(q_like)
         if not self.symbols and any(is_text(i) for i in items):
             # ^ cannot fill strings: the first non-empty, row by row.
             text = self.text_rows(items[-1])
@@ -1146,6 +1157,24 @@ def text_columns(node: exp.Case) -> list[exp.Expr]:
     if node.this is not None and any(is_text(w.this) for w in node.args["ifs"]):
         found.append(node.this)
     return found
+
+
+def q_comparison(node: exp.Coalesce):
+    """The comparison in COALESCE(cmp, b) when b is what q's cmp gives on a
+    null (qnulls.py's reading of q's comparisons as values)."""
+    from sqlglot_q.qnulls import CONTAINS, ORDERED, null_result
+
+    if len(node.expressions) != 1 or not isinstance(node.expressions[0], exp.Boolean):
+        return None
+    cmp = node.this
+    while isinstance(cmp, exp.Paren):
+        cmp = cmp.this
+    want = node.expressions[0].this
+    if isinstance(cmp, (*ORDERED, exp.EQ)) and null_result(cmp) is want:
+        return cmp
+    if isinstance(cmp, CONTAINS) and want is False:
+        return cmp
+    return None
 
 
 def atomic_literal(node: exp.Expr) -> bool:

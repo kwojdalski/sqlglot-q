@@ -175,14 +175,18 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
             return f"1+{key}?{key}", False, True
         return f"sums differ {key}", False, True
     if isinstance(fn, (exp.Lag, exp.Lead)):
-        if fn.args.get("default") is not None:
-            # SQL's default fills only past the partition's edge; q's ^ would
-            # fill x's own nulls too.
-            raise Refused("LAG/LEAD with a default has no faithful q form")
         offset = fn.args.get("offset")
         n = int(offset.name) if isinstance(offset, exp.Literal) else 1 if offset is None else None
         if n is None:
             raise Refused("LAG/LEAD is translated with a literal offset")
+        default = fn.args.get("default")
+        if default is not None:
+            # The default fills only past the partition's edge, not x's own
+            # nulls, so not ^.
+            from sqlglot_q.generator import LAG_DEFAULT, LEAD_DEFAULT
+
+            fill = LAG_DEFAULT if isinstance(fn, exp.Lag) else LEAD_DEFAULT
+            return f"{fill}[{gen.sql(fn.this)};{n};{gen.sql(default)}]", False, True
         n = n if isinstance(fn, exp.Lag) else -n
         return f"{n} xprev {gen.sql(fn.this)}", False, True
     if isinstance(fn, exp.Count):
@@ -208,7 +212,11 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
             word = NULL_SAFE.get(type(fn), WHOLE[type(fn)])
             return f"{word} {arg}", False, False
         if frame in ("range", "rows"):
-            return f"{RUNNING[type(fn)]} {arg}", frame == "range", True
+            from sqlglot_q.generator import RUNNING_SUM
+
+            # sums of a leading run of nulls is 0; SQL's running SUM is NULL.
+            word = RUNNING_SUM if isinstance(fn, exp.Sum) else RUNNING[type(fn)]
+            return f"{word} {arg}", frame == "range", True
         return f"{frame} {MOVING[type(fn)]} {arg}", False, True
     raise Refused(f"{type(fn).__name__} OVER has no q translation")
 

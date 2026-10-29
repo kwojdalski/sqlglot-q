@@ -170,6 +170,11 @@ def function(parser, value, order, non_null, QCall):
             return exp.RowNumber(), None, order is not None
         if call(right, "find"):
             return exp.Rank(), None, True
+    if isinstance(value, QCall) and value.args["fn"] in ("lagd", "leadd", "lag0"):
+        n = value.args.get("n") or exp.Literal.number(1)
+        default = value.args.get("default") or exp.Literal.number(0)
+        kind = exp.Lead if value.args["fn"] == "leadd" else exp.Lag
+        return kind(this=value.this, offset=n, default=default), None, True
     if isinstance(value, QCall) and value.args["fn"] == "first":
         return exp.FirstValue(this=value.this), None, True
     if (
