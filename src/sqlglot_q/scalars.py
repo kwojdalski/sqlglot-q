@@ -55,6 +55,7 @@ class Call:
     fixed: dict = field(default_factory=dict)  # args the node must have
     aggregate: bool = False
     check: object = None  # node -> why it has no q form, or None
+    ignored: tuple[str, ...] = ()  # args that say what the lambda does already
 
     def lambdas(self) -> tuple[str, ...]:
         return (self.symbol,) if self.text is None else (self.symbol, self.text)
@@ -111,12 +112,16 @@ CALLS = [
         "{(`month$x)-`month$y}",
         keys=("this", "expression"),
         fixed={"unit": "MONTH"},
+        # sqlglot 30.26 marks DuckDB's DATE_DIFF as counting boundaries.
+        ignored=("date_part_boundary",),
     ),
     Call(
         exp.DateDiff,
         "{(`year$x)-`year$y}",
         keys=("this", "expression"),
         fixed={"unit": "YEAR"},
+        # sqlglot 30.26 marks DuckDB's DATE_DIFF as counting boundaries.
+        ignored=("date_part_boundary",),
     ),
     # TRIM(s, 'ab'), LTRIM, RTRIM: any of the characters, off either end.
     *(
@@ -224,7 +229,7 @@ def matches(call: Call, node: exp.Expr) -> bool:
     return not any(
         value not in (None, False)
         for key, value in node.args.items()
-        if key not in call.keys and key not in call.fixed
+        if key not in call.keys and key not in call.fixed and key not in call.ignored
     )
 
 
