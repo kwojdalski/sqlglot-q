@@ -58,13 +58,15 @@ class TestSelect(Validator):
         self.validate("SELECT a % b FROM t", "select a mod b from t")
 
     def test_literals(self):
-        self.validate("SELECT 'abc', 'a b', '' FROM t", 'select `abc, `$("a b"), ` from t')
-        self.validate("SELECT 'abc' FROM t", 'select "abc" from t', string_literals="string")
-        self.validate("SELECT 'a' FROM t", 'select enlist "a" from t', string_literals="string")
-        self.validate("SELECT TRUE, FALSE, NULL FROM t", "select 1b, 0b, 0N from t")
+        self.validate("SELECT a, 'abc', 'a b', '' FROM t", 'select a, `abc, `$("a b"), ` from t')
+        self.validate("SELECT a, 'abc' FROM t", 'select a, "abc" from t', string_literals="string")
+        self.validate(
+            "SELECT a, 'a' FROM t", 'select a, enlist "a" from t', string_literals="string"
+        )
+        self.validate("SELECT a, TRUE, FALSE, NULL FROM t", "select a, 1b, 0b, 0N from t")
         # q refuses 1E3 and 1.5E+3; it reads 1000f and 1500.0.
-        self.validate("SELECT 1E3, 1.5E+3, 0.5E0 FROM t", "select 1000.0, 1500.0, 0.5 from t")
-        self.validate("SELECT -1.5 FROM t", "select -1.5 from t")
+        self.validate("SELECT a, 1E3, 1.5E+3, 0.5E0 FROM t", "select a, 1000.0, 1500.0, 0.5 from t")
+        self.validate("SELECT a, -1.5 FROM t", "select a, -1.5 from t")
 
     def test_string_equality_in_string_mode(self):
         self.validate(
@@ -124,6 +126,24 @@ class TestSelect(Validator):
         self.validate("SELECT * FROM t JOIN u USING (k, j)", "select from ej[`k`j;t;u]")
         self.validate("SELECT * FROM t LEFT JOIN u ON t.k = u.k", "select from t lj `k xkey u")
         self.validate("SELECT * FROM t CROSS JOIN u", "select from t cross u")
+
+    def test_subqueries(self):
+        self.validate(
+            "SELECT a FROM t WHERE a > (SELECT AVG(a) FROM t)",
+            "select a from t where a>(first exec x from (select x:avg a from t))",
+        )
+        self.validate("SELECT s FROM (SELECT a AS s FROM t)", "select s from (select s:a from t)")
+
+    def test_constant_columns_get_a_value_per_row(self):
+        # q refuses a select whose columns are all atoms ('rank).
+        self.validate("SELECT 1 AS one FROM t", "select one:{(count x)#y}[i;1] from t")
+        self.validate("SELECT 1 AS one, a FROM t", "select one:1, a from t")
+
+    def test_union_order_and_limit(self):
+        self.validate(
+            "SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY a LIMIT 2",
+            "2 sublist (`a xasc ((select a from t),(select a from u)))",
+        )
 
     def test_ctes_are_inlined(self):
         self.validate(
@@ -192,6 +212,7 @@ class TestRefusals(Validator):
         self.refuses("SELECT count FROM t", "q keyword")
         self.refuses("SELECT a FROM db.t", "qualified table")
         self.refuses("SELECT a FROM t ORDER BY a + 1", "ORDER BY")
+        self.refuses("SELECT a FROM t WHERE d = NULL", "IS NULL")
 
     def test_ignore_level_still_emits_q_that_refuses(self):
         q = sqlglot.transpile(

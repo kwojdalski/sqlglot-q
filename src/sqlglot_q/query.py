@@ -191,7 +191,7 @@ def query(gen: QGenerator, node: exp.Select) -> str:
             sort_result, sort_source = order_terms(gen, order, items, names, allow_source=True)
         if sort_source:
             src = f"({sort(sort_source, src)})"
-        columns = "" if star else " " + ", ".join(gen.sql(i) for i in items)
+        columns = "" if star else " " + ", ".join(projection(gen, items))
         distinct = " distinct" if node.args.get("distinct") else ""
         text = f"select{distinct}{columns} from {src}{where}"
 
@@ -204,6 +204,19 @@ def query(gen: QGenerator, node: exp.Select) -> str:
     if sort_result:
         text = sort(sort_result, text)
     return limited(gen, node, text)
+
+
+def projection(gen: QGenerator, items: list[exp.Expr]) -> list[str]:
+    """The select phrase. SELECT 1 AS one FROM t has a row per row of t, but
+    a q select whose columns are all atoms is refused ('rank), so then each
+    constant is spread over the rows: q 5 runs {(count x)#y}[i;1] per row."""
+    if any(i.find(exp.Column, exp.AggFunc, exp.Star) for i in items):
+        return [gen.sql(i) for i in items]
+    out = []
+    for item in items:
+        value = f"{{(count x)#y}}[i;{gen.sql(unalias(item))}]"
+        out.append(f"{gen.name(item.alias)}:{value}" if isinstance(item, exp.Alias) else value)
+    return out
 
 
 def no_from(gen: QGenerator, items: list[exp.Expr]) -> str:

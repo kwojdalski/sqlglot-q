@@ -76,6 +76,11 @@ QUERIES = [
     ("SELECT a FROM t UNION ALL SELECT a FROM u", False),
     ("SELECT a FROM t UNION SELECT a FROM u", False),
     ("SELECT 1 + 2 AS x", False),
+    ("SELECT a FROM t WHERE a > (SELECT AVG(a) FROM t)", False),
+    ("SELECT a, (SELECT MAX(a) FROM u) AS m FROM t", False),
+    ("SELECT 1 AS one FROM t", False),
+    ("SELECT 1 AS one, 'k' AS s FROM t WHERE a > 4", False),
+    ("SELECT a FROM t UNION ALL SELECT a FROM u ORDER BY a DESC LIMIT 3", True),
 ]
 
 

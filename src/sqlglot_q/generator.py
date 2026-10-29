@@ -46,6 +46,8 @@ GLYPHS = {
     exp.Or: "|",
 }
 
+COMPARISONS = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)
+
 # SQL aggregates whose q keyword skips nulls the way SQL does.
 AGGREGATES = {
     exp.Sum: "sum",
@@ -96,7 +98,10 @@ def atomic(node: exp.Expr) -> bool:
     """Whether a node prints as one q token, so it needs no parentheses as an operand."""
     if isinstance(node, exp.Neg):
         return False
-    return isinstance(node, (exp.Column, exp.Literal, exp.Null, exp.Boolean, exp.Paren))
+    # A subquery prints parenthesised already (q_subquery).
+    return isinstance(
+        node, (exp.Column, exp.Literal, exp.Null, exp.Boolean, exp.Paren, exp.Subquery)
+    )
 
 
 class QGenerator(Generator):
@@ -205,6 +210,12 @@ class QGenerator(Generator):
     def binary(self, node: exp.Expr) -> str:
         glyph = GLYPHS[type(node)]
         left, right = node.this, node.expression
+        if isinstance(node, COMPARISONS) and (
+            isinstance(left, exp.Null) or isinstance(right, exp.Null)
+        ):
+            # In SQL x = NULL is unknown on every row; q's x=0N is true on the
+            # null ones. There is no q boolean for unknown.
+            return self.refuse("a comparison with NULL is never true in SQL: write IS NULL")
         if not self.symbols and isinstance(node, (exp.EQ, exp.NEQ)):
             # = on strings compares char by char; ~ compares whole strings.
             if is_text(right) or is_text(left):
@@ -346,7 +357,16 @@ class QGenerator(Generator):
         return f"{self.name(node.alias)}:{self.sql(node.this)}"
 
     def q_subquery(self, node: exp.Subquery) -> str:
-        return f"({self.sql(node.this)})"
+        # A subquery reached here stands for a value (WHERE a > (SELECT ...)):
+        # q's select returns a table, so take its one column's first item.
+        # FROM, JOIN and UNION read subqueries as tables, via operand_query.
+        select = node.this
+        if not isinstance(select, exp.Select) or len(select.expressions) != 1:
+            return self.refuse("a scalar subquery needs exactly one column")
+        inner = select.copy()
+        inner.set("expressions", [exp.alias_(unalias(select.expressions[0]), "x")])
+        # Parenthesised, or a select phrase around it reads its from ('from).
+        return f"(first exec x from ({self.sql(inner)}))"
 
     # Queries --------------------------------------------------------------
 
@@ -360,12 +380,27 @@ class QGenerator(Generator):
             self.depth -= 1
 
     def q_union(self, node: exp.Union) -> str:
+        from sqlglot_q.query import limited, order_terms, output_names, sort
+
         both = f"{self.operand_query(node.this)},{self.operand_query(node.expression)}"
-        return both if not node.args.get("distinct") else f"distinct {both}"
+        text = both if not node.args.get("distinct") else f"distinct {both}"
+        # ORDER BY and LIMIT after a UNION belong to the union, and name the
+        # columns of its first query.
+        order = node.args.get("order")
+        if order:
+            first = node.this
+            while isinstance(first, (exp.Union, exp.Subquery)):
+                first = first.this
+            items = list(first.expressions)
+            terms, _ = order_terms(self, order, items, output_names(items), allow_source=False)
+            text = sort(terms, text)
+        return limited(self, node, text)
 
     def operand_query(self, node: exp.Expr) -> str:
-        text = self.sql(node)
-        return text if isinstance(node, exp.Subquery) else f"({text})"
+        """A query used as a table: FROM (...), a join side, a UNION operand."""
+        if isinstance(node, exp.Subquery):
+            node = node.this
+        return f"({self.sql(node)})"
 
     # Statements -----------------------------------------------------------
 
@@ -437,6 +472,10 @@ class QGenerator(Generator):
         from sqlglot_q.query import conjuncts
 
         return " where " + ", ".join(self.sql(c) for c in conjuncts(node.this))
+
+
+def unalias(node: exp.Expr) -> exp.Expr:
+    return node.this if isinstance(node, exp.Alias) else node
 
 
 def is_text(node: exp.Expr) -> bool:
