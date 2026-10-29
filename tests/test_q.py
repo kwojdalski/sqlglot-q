@@ -339,7 +339,7 @@ class TestStatements(Validator):
         )
 
     def test_update_and_delete(self):
-        self.validate("UPDATE t SET a = 1", "update a:1 from `t")
+        self.validate("UPDATE t SET a = 1", "update a:(type a)$1 from `t")
         self.validate("UPDATE t SET a = 1 WHERE b = 2", "update a:(type a)$1 from `t where b=2")
         self.validate("DELETE FROM t WHERE a = 1", "delete from `t where a=1")
 

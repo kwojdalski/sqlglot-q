@@ -1314,32 +1314,99 @@ class QGenerator(Generator):
             target = target.this
         table = f"`{self.table_sql(target)}"
         source = node.expression
+        name = self.table_sql(target)
         if isinstance(source, exp.Values):
             rows = [r.expressions for r in source.expressions]
+
+            def column_of(i: int) -> str:
+                # The target's column: a NULL in it is that column's null.
+                return f"{name}`{columns[i]}" if columns else f"{name} (cols {name}) {i}"
+
+            def cell(i: int) -> str:
+                values = [row[i] for row in rows]
+                nulls = [n for n, v in enumerate(values) if isinstance(v, exp.Null)]
+                null = f"first 0#{column_of(i)}"
+                known = [v for v in values if not isinstance(v, exp.Null)]
+                if nulls and known and not any(is_text(v) for v in known):
+                    nulls = []  # 70 0N: a number's null is q's 0N already
+                if nulls and known and self.symbols and len(rows) > 1:
+                    # `e`: a null symbol is the empty one, in the list itself.
+                    values = [
+                        exp.Literal.string("") if isinstance(v, exp.Null) else v for v in values
+                    ]
+                    nulls = []
+                if not nulls:
+                    return self.vector(values) if len(rows) > 1 else self.sql(values[0])
+                if len(rows) == 1:
+                    return null
+                if not known:
+                    return f"{len(rows)}#{null}"
+                filled = self.vector([known[0] if isinstance(v, exp.Null) else v for v in values])
+                return f"@[{filled};{' '.join(map(str, nulls))};:;{null}]"
+
+            width = len(columns) if columns else len(rows[0])
+            cells = [cell(i) for i in range(width)]
+            if width == 1 and len(rows) > 1 and not columns:
+                # One column of several rows: (1 2) would be a row of two.
+                return f"{table} {verb} enlist {cells[0]}"
             if columns:
-                cells = [self.vector([row[i] for row in rows]) for i in range(len(columns))]
                 body = ";".join(f"{c}:{v}" for c, v in zip(columns, cells, strict=True))
+                if len(rows) == 1:
+                    body = ";".join(f"{c}:enlist {v}" for c, v in zip(columns, cells, strict=True))
                 return f"{table} {verb} ([] {body})"
-            if len(rows) == 1:
-                return f"{table} {verb} ({';'.join(self.sql(v) for v in rows[0])})"
-            cols = [self.vector([row[i] for row in rows]) for i in range(len(rows[0]))]
-            return f"{table} {verb} ({';'.join(cols)})"
-        if columns:
-            return self.refuse("INSERT INTO t (cols) SELECT ... is not translated")
-        return f"{table} {verb} {self.operand_query(source)}"
+            return f"{table} {verb} ({';'.join(cells)})"
+        # SQL inserts by position (or into the columns listed): the query's
+        # columns renamed to the target's, as q's insert matches names.
+        names = "".join(f"`{c}" for c in columns) if columns else f"(cols {name})"
+        return f"{table} {verb} {names} xcol {self.operand_query(source)}"
 
     def update_sql(self, node: exp.Update) -> str:
+        if node.args.get("from_") or node.args.get("joins"):
+            # UPDATE ... FROM u: each row's value from a row of u. Written as
+            # a plain update, t.g = u.g would read g=g, true on every row.
+            return self.refuse("UPDATE ... FROM has no q translation here")
         where = self.where(node.args.get("where"))
         sets = []
         for e in node.expressions:
-            col, value = self.name(e.this.name), self.sql(e.expression)
-            if where and not (not self.symbols and is_text(e.expression)):
-                # Amending some rows of a column needs the column's own type:
-                # q refuses 0 into a float column ('type) where SQL converts.
+            col = self.name(e.this.name)
+            if isinstance(e.expression, exp.Null):
+                # The column's own null: 0N is a long, 'type into symbols.
+                sets.append(f"{col}:first 0#{col}")
+                continue
+            lookup = correlated_lookup(self, node, e.expression)
+            value = lookup if lookup is not None else self.sql(e.expression)
+            if not (not self.symbols and is_text(e.expression)):
+                # A column keeps its type, as SQL's: q refuses 0 into a
+                # float column ('type) where SQL converts, and v%3 would make
+                # a long column float where SQL rounds it back.
                 value = f"(type {col})${self.operand_text(e.expression, value)}"
             sets.append(f"{col}:{value}")
         sets = ",".join(sets)
         return f"update {sets} from `{self.table_sql(node.this)}{where}"
+
+    def alter_sql(self, node: exp.Alter) -> str:
+        if (node.args.get("kind") or "").upper() != "TABLE" or len(node.args["actions"]) != 1:
+            return self.refuse("ALTER is translated for one change to a table")
+        name = self.table_sql(node.this)
+        action = node.args["actions"][0]
+        if isinstance(action, exp.ColumnDef):
+            # ADD COLUMN c T: c of T's null on every row.
+            kind = action.args.get("kind")
+            if kind is not None and kind.this in TEXT:
+                empty = "`" if self.symbols else '(count i)#enlist ""'
+                return f"update {self.name(action.name)}:{empty} from `{name}"
+            if kind is None or kind.this not in TYPES:
+                return self.refuse("ALTER TABLE ADD COLUMN needs a type q has")
+            return f"update {self.name(action.name)}:first {TYPES[kind.this][1]} from `{name}"
+        if isinstance(action, exp.RenameColumn):
+            old, new = self.name(action.this.name), self.name(action.args["to"].name)
+            return f"`{name} set @[cols {name};where (cols {name})=`{old};:;`{new}] xcol {name}"
+        if isinstance(action, exp.Drop) and (action.args.get("kind") or "").upper() == "COLUMN":
+            dropped = action.args.get("tables") or [action.this]
+            return f"delete {','.join(self.name(c.name) for c in dropped)} from `{name}"
+        if isinstance(action, exp.AlterRename):
+            return f"{self.table_sql(action.this)}:{name};delete {name} from `."
+        return self.refuse(f"ALTER TABLE {action.key.upper()} has no q translation here")
 
     def delete_sql(self, node: exp.Delete) -> str:
         return f"delete from `{self.table_sql(node.this)}{self.where(node.args.get('where'))}"
@@ -1559,6 +1626,36 @@ def flatten_dpipe(node: exp.Expr) -> list[exp.Expr]:
 
 def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
+
+
+def correlated_lookup(gen, update: exp.Update, value: exp.Expr) -> str | None:
+    """SET c = (SELECT AGG(x) FROM u WHERE u.k = t.k ...): the subquery
+    grouped by its key, looked up by each row's key; NULL (COUNT's 0) where
+    no row matches."""
+    from sqlglot_q.correlated import outer_columns, semi_join
+
+    query = value.this if isinstance(value, exp.Subquery) else None
+    if not isinstance(query, exp.Select) or not outer_columns(query):
+        return None
+    found = semi_join(query)
+    if found is None or len(query.expressions) != 1:
+        return None
+    outer, inner, rest = found
+    if outer.table not in ("", update.this.alias_or_name):
+        return None
+    agg = query.expressions[0]
+    agg = agg.this if isinstance(agg, exp.Alias) else agg
+    if not isinstance(agg, exp.AggFunc):
+        return None
+    grouped = exp.Select(
+        expressions=[exp.alias_(inner.copy(), "q_k"), exp.alias_(agg.copy(), "q_c")]
+    ).from_(query.args["from_"].this.copy(), copy=False)
+    if rest:
+        grouped.set("where", exp.Where(this=exp.and_(*(c.copy() for c in rest), copy=False)))
+    grouped.set("group", exp.Group(expressions=[inner.copy()]))
+    keyed = gen.sql(grouped).removeprefix("0!")
+    text = f"(({keyed})([] q_k:{gen.name(outer.name)}))`q_c"
+    return f"0^{text}" if isinstance(agg, exp.Count) else text
 
 
 def condition_like(node: exp.Expr) -> bool:

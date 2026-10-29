@@ -286,7 +286,8 @@ class QParser:
 
     def parse(self, text: str) -> list[exp.Expr]:
         return [
-            Statement(tokenize(s), s, self.functions).statement() for s in split_statements(text)
+            Statement(tokenize(t), t, self.functions).statement()
+            for t in map(insert_forms, split_statements(text))
         ]
 
 
@@ -1871,15 +1872,52 @@ def renamed(parser: Statement, names: exp.Expr, target: exp.Expr) -> exp.Expr:
     items = target.expressions
     if len(new) > len(items):
         parser.fail("xcol names more columns than the select has")
+    target.meta["xcol"] = (new, [i.copy() for i in items])  # an insert's columns
     for i, name in enumerate(new):
         target.expressions[i] = exp.alias_(unalias(items[i]), name, quoted=True)
     return target
+
+
+TYPED_NULL = re.compile(r"first 0#[A-Za-z]\w*(?:`[A-Za-z]\w*| \(cols [A-Za-z]\w*\) \d+)")
+NULL_FILL = re.compile(r"(\d+)#0N\b")
+AMEND = re.compile(r"@\[([^;\[\]()]+);([\d ]+);:;0N\]")
+
+
+def insert_forms(text: str) -> str:
+    """The generator's insert, in q this reader reads: a column's typed null
+    (first 0#t`c) is 0N, an amend of nulls into a vector is the vector with
+    them, and (cols t) xcol q, a positional insert, is q."""
+    if re.match(r"\s*update ", text):
+        # update c:first 0#c: SET c = NULL, the column's own null.
+        return re.sub(r"first 0#[A-Za-z]\w*\b", "0N", text)
+    if not re.match(r"\s*`[A-Za-z]\w* (insert|upsert) ", text):
+        return text
+    text = TYPED_NULL.sub("0N", text)
+
+    def amend(m: re.Match) -> str:
+        values, nulls = m[1].strip(), {int(i) for i in m[2].split()}
+        if values.startswith("`"):
+            items = values.split("`")[1:]
+            return "`" + "`".join("" if i in nulls else v for i, v in enumerate(items))
+        items = values.split()
+        return "(" + ";".join("0N" if i in nulls else v for i, v in enumerate(items)) + ")"
+
+    text = AMEND.sub(amend, text)
+    text = NULL_FILL.sub(lambda m: "(" + ";".join(["0N"] * int(m[1])) + ")", text)
+    return re.sub(r"\(cols [A-Za-z]\w*\) xcol ", "", text)
 
 
 def inserted(parser: Statement, table: exp.Expr, values: exp.Expr) -> exp.Expr:
     if not (isinstance(table, exp.Literal) and table.is_string):
         parser.fail("insert is read into a table named by symbol")
     target = exp.to_table(table.this)
+    if is_query(values) and values.meta.get("xcol"):
+        # `t insert `a`b xcol q: INSERT INTO t (a, b) SELECT ...
+        names, items = values.meta["xcol"]
+        values = values.copy()
+        values.set("expressions", items)
+        schema = exp.Schema(this=target, expressions=[exp.to_identifier(n) for n in names])
+        return exp.Insert(this=schema, expression=values)
     if is_query(values):
         return exp.Insert(this=target, expression=values)
     if isinstance(values, TableLiteral):
@@ -1889,6 +1927,10 @@ def inserted(parser: Statement, table: exp.Expr, values: exp.Expr) -> exp.Expr:
             this=target, expressions=[exp.to_identifier(c) for c in values.args["columns"]]
         )
         return exp.Insert(this=schema, expression=exp.Values(expressions=rows))
+    if isinstance(values, Enlisted) and isinstance(values.this, Rows):
+        # `t insert enlist 1 2: one column, a row per value.
+        rows = [exp.Tuple(expressions=[v]) for v in values.this.args["items"]]
+        return exp.Insert(this=target, expression=exp.Values(expressions=rows))
     if not isinstance(values, Rows):
         parser.fail("insert takes a row or a list of columns")
     items = values.args["items"]
