@@ -50,10 +50,16 @@ def window_stage(parser, items, keys, source) -> exp.Expr:
         source.set("order", None)
 
     # update s:last s by g,o over a running stage: SQL's RANGE frame.
-    if isinstance(value, QCall) and value.args["fn"] == "last":
+    # (last of another column is LAST_VALUE over the whole partition.)
+    tie_fix = (
+        isinstance(value, QCall)
+        and value.args["fn"] == "last"
+        and isinstance(value.this, exp.Column)
+        and value.this.name == name
+        and windowed_item(source, name) is not None
+    )
+    if tie_fix:
         target = windowed_item(source, name)
-        if target is None or not isinstance(value.this, exp.Column) or value.this.name != name:
-            parser.fail("last in an update is read only over the window stage it names")
         wins = list(target.this.find_all(exp.Window))
         peers = [c.name for c in parts]
         for win in wins:
@@ -164,6 +170,27 @@ def function(parser, value, order, non_null, QCall):
             return exp.RowNumber(), None, order is not None
         if call(right, "find"):
             return exp.Rank(), None, True
+    if isinstance(value, QCall) and value.args["fn"] == "first":
+        return exp.FirstValue(this=value.this), None, True
+    if (
+        isinstance(value, QCall)
+        and value.args["fn"] == "last"
+        and isinstance(value.this, exp.Column)
+    ):
+        whole = exp.WindowSpec(
+            kind="ROWS",
+            start="UNBOUNDED",
+            start_side="PRECEDING",
+            end="UNBOUNDED",
+            end_side="FOLLOWING",
+        )
+        return exp.LastValue(this=value.this), whole, True
+    if isinstance(value, QCall) and value.args["fn"] == "ntile":
+        return exp.Ntile(this=value.args["n"]), None, True
+    if isinstance(value, QCall) and value.args["fn"] == "percent_rank":
+        return exp.PercentRank(), None, True
+    if isinstance(value, QCall) and value.args["fn"] == "cume_dist":
+        return exp.CumeDist(), exp.WindowSpec(**ROWS), True
     if isinstance(value, QCall):
         fn = value.args["fn"]
         if fn == "sums" and call(value.this, "differ"):

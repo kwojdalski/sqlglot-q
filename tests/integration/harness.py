@@ -24,14 +24,23 @@ def q_binary() -> str | None:
     return shutil.which("q")
 
 
+class Strings(list):
+    """A text column as q strings (char vectors), for string_literals="string";
+    a plain list of str is a symbol column. q has no null string: None is ""."""
+
+
 def q_column(values: list) -> str:
     """A Python column as a q list literal of one type. One value is a
     one-item list (enlist), not the atom q would read the bare literal as."""
     text = q_items(values)
-    return f"enlist {text}" if len(values) == 1 and not text.startswith("`$(") else text
+    one = len(values) == 1 and not text.startswith(("`$(", "("))
+    return f"enlist {text}" if one else text
 
 
 def q_items(values: list) -> str:
+    if isinstance(values, Strings):
+        # (),"x" keeps a one-character string a string, not a char atom.
+        return "(" + ";".join("()," + json.dumps(v or "") for v in values) + ")"
     present = [v for v in values if v is not None]
     if present and all(isinstance(v, dt.datetime) for v in present):
         return " ".join(
@@ -66,6 +75,7 @@ def q_string(text: str) -> str:
 
 
 def run_q(tables: dict[str, dict[str, list]], queries: list[str]) -> list[Rows | str]:
+    """A string column comes back from q's JSON as text, as a symbol does."""
     """Evaluate each query on fresh copies of the tables; a result is its rows,
     or the error q signalled, as a string."""
     binary = q_binary()
@@ -141,6 +151,13 @@ def normal(rows: Rows) -> Rows:
     def cell(v):
         if isinstance(v, bool):
             return v
+        # A duration: DuckDB's timedelta and q's timespan 0D09:30:00.000000000.
+        if isinstance(v, dt.timedelta):
+            return round(v.total_seconds(), 6)
+        if isinstance(v, str) and SPAN.match(v):
+            sign, days, h, m, sec = SPAN.match(v).groups()
+            total = int(days) * 86400 + int(h) * 3600 + int(m) * 60 + float(sec)
+            return round(-total if sign else total, 6)
         if isinstance(v, (dt.date, dt.time)):
             v = v.isoformat()
         if isinstance(v, str) and TEMPORAL.match(v):
@@ -159,6 +176,7 @@ def normal(rows: Rows) -> Rows:
     return [tuple(cell(v) for v in row) for row in rows]
 
 
+SPAN = re.compile(r"(-?)(\d+)D(\d\d):(\d\d):(\d\d(?:\.\d+)?)$")
 TEMPORAL = re.compile(
     r"(\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}:\d{2}(\.\d+)?)?|\d{2}:\d{2}:\d{2}(\.\d+)?)$"
 )

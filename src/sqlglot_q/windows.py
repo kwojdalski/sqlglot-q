@@ -125,7 +125,7 @@ def stage(gen: QGenerator, plan, value: str, tie_fix: bool, name: str, source: s
     from sqlglot_q.query import sort, wrap
 
     parts, terms = plan[0], plan[1]
-    src = sort(list(terms), wrap(source)) if terms else source
+    src = sort(list(terms), wrap(source), gen) if terms else source
     by = f" by {','.join(parts)}" if parts else ""
     text = f"update {name}:{value}{by} from {wrap(src)}"
     if tie_fix:
@@ -140,8 +140,33 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
     fn = win.this
     spec = win.args.get("spec")
     frame = frame_of(spec, has_order)
+    from sqlglot_q.generator import CUME_DIST, NTILE, PERCENT_RANK
+
     if isinstance(fn, exp.RowNumber):
         return "1+til count i", False, has_order
+    if isinstance(fn, exp.FirstValue):
+        if frame not in ("whole", "range", "rows"):
+            raise Refused("FIRST_VALUE is translated from the partition's first row")
+        return f"first {gen.operand(fn.this)}", False, has_order
+    if isinstance(fn, exp.LastValue):
+        if frame != "whole":
+            raise Refused(
+                "LAST_VALUE is translated over the whole partition (ROWS BETWEEN UNBOUNDED "
+                "PRECEDING AND UNBOUNDED FOLLOWING); with the default frame it is the row itself"
+            )
+        return f"last {gen.operand(fn.this)}", False, has_order
+    if isinstance(fn, exp.Ntile):
+        if not order:
+            raise Refused("NTILE needs an ORDER BY")
+        return f"{NTILE}[{gen.sql(fn.this)};i]", False, True
+    if isinstance(fn, (exp.PercentRank, exp.CumeDist)):
+        if not order:
+            raise Refused(f"{type(fn).__name__} needs an ORDER BY")
+        key = order[0] if len(order) == 1 else f"flip({';'.join(order)})"
+        if isinstance(fn, exp.PercentRank):
+            return f"{PERCENT_RANK} {key}", False, True
+        # The share of rows at or before this one, peers included.
+        return f"{CUME_DIST} i", True, True
     if isinstance(fn, (exp.Rank, exp.DenseRank)):
         if not order:
             raise Refused("RANK needs an ORDER BY")

@@ -88,7 +88,42 @@ NON_NULL = "{x where not null x}"
 SUM = f"sum {NULLS}"
 MIN = f"first asc {NON_NULL}"  # asc orders symbols too; first of none is null
 MAX = "last asc"  # nulls sort first, so last is the largest
+# string_literals="string": text is a list of char vectors, which null tests
+# character by character and q sorts element by element. q has no null
+# string, so a null text is the empty one, and text sorts as symbols do.
+TEXT_NULL = "{$[0h=type x;0=count each x;null x]}"
+TEXT_KEY = "{$[0h=type x;`$x;x]}"
+# (v, not y: a lambda naming y takes two arguments)
+TEXT_MIN = f"first {{v iasc {TEXT_KEY} v:x where not {TEXT_NULL} x}}"
+TEXT_MAX = f"last {{x iasc {TEXT_KEY} x}}"
+TEXT_PICK = "{$[x;y;z]}'"  # CASE over text: ?[...] cannot pick strings
+TEXT_LENGTH = "{?[0=count each x;0N;count each x]}"
+TEXT_FILL = "{$[0=count x;y;x]}'"  # COALESCE over text
 PARSE = {"boolean": "B", "short": "H", "int": "I", "long": "J", "real": "E", "float": "F"}
+TEXT_AGG = '{{$[all {null} x;"";({sep}) sv x where not {null} x]}}'.replace(
+    "{null}", TEXT_NULL.replace("{", "{{").replace("}", "}}")
+)
+# Calendar parts and truncations q has no single word for. q's day 0,
+# 2000.01.01, is a Saturday; SQL's DOW counts from Sunday.
+DOW = "{(6+`int$`date$x) mod 7}"
+DOY = "{1+(`date$x)-`date$`month$12*(`year$x)-2000}"
+QUARTER = "{1+((`mm$x)-1) div 3}"
+MILLISECOND = "{((`ss$x)*1000)+((`long$x) mod 1000000000) div 1000000}"
+TRUNC = {
+    "MONTH": "{`timestamp$`date$`month$x}",
+    "QUARTER": "{`timestamp$`date$3 xbar `month$x}",
+    "YEAR": "{`timestamp$`date$`month$12*(`year$x)-2000}",
+}
+# Text functions, each over the rows: symbols go through their strings.
+REPLACE = ("{`$ssr[;y;z] each string x}", "{ssr[;y;z] each x}")
+SUBSTRING = ("{`$sublist[(y-1;z)] each string x}", "{sublist[(y-1;z)] each x}")
+SUBSTRING_FROM = ("{`$(y-1)_' string x}", "{(y-1)_' x}")
+REVERSE = ("{`$reverse each string x}", "{reverse each x}")
+# Window functions with no q word, applied to a stage's rows (windows.py).
+# NTILE as SQL defines it: the first n mod k buckets get the extra rows.
+NTILE = "{n:count y;s:n div x;r:n mod x;j:til n;1+?[j<r*s+1;j div s+1;r+(j-r*s+1) div s]}"
+PERCENT_RANK = "{$[1=count x;(count x)#0f;(x?x)%-1+count x]}"
+CUME_DIST = "{(1+til count x)%count x}"
 # LEFT(s, n) and RIGHT(s, n): sublist, not #, which repeats a short string.
 LEFT = ("{`$x sublist/:string y}", "{x sublist/:y}")
 RIGHT = ("{`$(neg x) sublist/:string y}", "{(neg x) sublist/:y}")
@@ -351,6 +386,14 @@ class QGenerator(Generator):
                     left, right = right, left
                 match = f"{self.operand(left)}~\\:{self.sql(right)}"
                 return match if isinstance(node, exp.EQ) else f"not {match}"
+            # Two columns, of text or not: match row by row.
+            match = f"{self.operand(left)}~'{self.operand(right)}"
+            return match if isinstance(node, exp.EQ) else f"not {match}"
+        if not self.symbols and (is_text(left) or is_text(right)):
+            # < and > on strings compare character by character; as symbols
+            # they compare in the text's order.
+            sides = [f"(`${self.operand(x)})" for x in (left, right)]
+            return f"{sides[0]}{glyph}{sides[1]}"
         return f"{self.operand(left)}{glyph}{self.operand(right)}"
 
     eq_sql = neq_sql = gt_sql = gte_sql = lt_sql = lte_sql = binary
@@ -371,11 +414,61 @@ class QGenerator(Generator):
             return self.refuse("STRING_AGG is translated with a literal separator")
         if isinstance(node.this, (exp.Distinct, exp.Order)) or node.args.get("order"):
             return self.refuse("STRING_AGG with DISTINCT or ORDER BY has no q translation here")
+        sep_text = self.chars(sep.this).replace("enlist ", "")
         if not self.symbols:
-            return self.refuse('STRING_AGG is translated for symbols, not string_literals="string"')
+            fn = TEXT_AGG.format(sep=sep_text)
+            # first enlist: first of the joined string would be its first char
+            return f"first enlist {fn}[{self.sql(node.this)}]"
         # Skips nulls as SQL does; all null (or none) is the null symbol.
-        fn = STRING_AGG.format(sep=self.chars(sep.this).replace("enlist ", ""))
+        fn = STRING_AGG.format(sep=sep_text)
         return f"first {fn}[{self.sql(node.this)}]"
+
+    def dayofweek_sql(self, node) -> str:
+        return f"{DOW} {self.operand(node.this)}"
+
+    def dayofyear_sql(self, node) -> str:
+        return f"{DOY} {self.operand(node.this)}"
+
+    def quarter_sql(self, node) -> str:
+        return f"{QUARTER} {self.operand(node.this)}"
+
+    def datediff_sql(self, node: exp.DateDiff) -> str:
+        unit = (node.text("unit") or "DAY").upper()
+        if unit not in ("DAY", "DAYS"):
+            return self.refuse(f"DATE_DIFF in {unit} has no q translation here")
+        # Day boundaries between the two, as SQL counts them.
+        end, start = (f"(`date${self.operand(e)})" for e in (node.this, node.expression))
+        return f"{end}-{start}"
+
+    def replace_sql(self, node: exp.Replace) -> str:
+        args = (node.expression, node.args.get("replacement"))
+        if not all(isinstance(a, exp.Literal) and a.is_string for a in args):
+            return self.refuse("REPLACE is translated with literal text to find and put")
+        fn = REPLACE[0] if self.symbols else REPLACE[1]
+        find, put = (self.chars(a.this).replace("enlist ", "") for a in args)
+        return f"{fn}[{self.sql(node.this)};({find});({put})]"
+
+    def substring_sql(self, node: exp.Substring) -> str:
+        start, length = node.args.get("start"), node.args.get("length")
+        if start is None:
+            return self.refuse("SUBSTRING without a start has no q translation")
+        if length is None:
+            fn = SUBSTRING_FROM[0] if self.symbols else SUBSTRING_FROM[1]
+            return f"{fn}[{self.sql(node.this)};{self.sql(start)}]"
+        fn = SUBSTRING[0] if self.symbols else SUBSTRING[1]
+        return f"{fn}[{self.sql(node.this)};{self.sql(start)};{self.sql(length)}]"
+
+    def reverse_sql(self, node: exp.Reverse) -> str:
+        fn = REVERSE[0] if self.symbols else REVERSE[1]
+        return f"{fn} {self.operand(node.this)}"
+
+    def exists_sql(self, node: exp.Exists) -> str:
+        # Uncorrelated: whether the subquery has a row. A subquery reading the
+        # outer query's columns is refused by q when it runs ('col).
+        query = node.this
+        if isinstance(query, exp.Subquery):
+            query = query.this
+        return f"0<count {self.operand_query(query)}"
 
     def mod_sql(self, node: exp.Mod) -> str:
         floor = floor_mod(node)
@@ -391,10 +484,20 @@ class QGenerator(Generator):
 
     def is_sql(self, node: exp.Is) -> str:
         if isinstance(node.expression, exp.Null):
-            return f"null {self.sql(node.this)}"
+            return self.is_null(self.sql(node.this))
         return self.refuse("IS is only translated for IS NULL and IS NOT NULL")
 
     def in_sql(self, node: exp.In) -> str:
+        items = node.expressions
+        kinds = {
+            "." in i.this or "e" in i.this.lower()
+            for i in items
+            if isinstance(i, exp.Literal) and not i.is_string
+        }
+        if len(kinds) > 1 and node.args.get("query") is None:
+            # IN (1, 2.5): q's in refuses a long column against a float list
+            # ('type), where = compares across them.
+            return f"any {self.operand(node.this)}=/:{self.vector(items)}"
         subject = self.operand(node.this)
         query = node.args.get("query")
         if query is not None:
@@ -447,10 +550,10 @@ class QGenerator(Generator):
             if len(arg.expressions) != 1:
                 return self.refuse("COUNT(DISTINCT ...) is only translated for one column")
             col = self.operand(arg.expressions[0])
-            return f"count distinct {col} where not null {col}"
+            return f"count distinct {col} where not {self.is_null(col)}"
         col = self.operand(arg)
         # COUNT(x) counts the rows where x is not null.
-        return f"count {col} where not null {col}"
+        return f"count {col} where not {self.is_null(col)}"
 
     def aggregate(self, node: exp.Expr) -> str:
         if node.args.get("distinct") or isinstance(node.this, exp.Distinct):
@@ -458,6 +561,8 @@ class QGenerator(Generator):
                 f"{node.sql()}: DISTINCT inside an aggregate is only translated for COUNT"
             )
         word = NULL_SAFE.get(type(node), AGGREGATES[type(node)])
+        if not self.symbols and isinstance(node, (exp.Min, exp.Max)):
+            word = TEXT_MIN if isinstance(node, exp.Min) else TEXT_MAX
         return f"{word} {self.sql(node.this)}"
 
     sum_sql = avg_sql = min_sql = max_sql = aggregate
@@ -507,6 +612,8 @@ class QGenerator(Generator):
             ],
             default=node.this.copy(),
         )
+        if not self.symbols and any(is_text(x) for x in (node.this, node.expression)):
+            case.meta["text"] = True  # NULLIF(w, ''): the branches are text
         return self.case_sql(case)
 
     def filter_sql(self, node: exp.Filter) -> str:
@@ -540,6 +647,11 @@ class QGenerator(Generator):
         if not columns:
             return text
         # || is NULL when any side is; CONCAT skips nulls.
+        if not self.symbols:
+            # || is NULL when a side is; a null string is the empty one.
+            guards = [self.is_null(self.operand(c)) for c in columns]
+            guard = guards[0] if len(guards) == 1 else "|".join(f"({g})" for g in guards)
+            return f'{TEXT_PICK}[{guard};(count i)#enlist "";{text}]'
         guards = [f"null {self.operand(c)}" for c in columns]
         guard = guards[0] if len(guards) == 1 else "|".join(f"({g})" for g in guards)
         empty = "`" if self.symbols else '""'
@@ -576,17 +688,25 @@ class QGenerator(Generator):
             right = piece if " " not in piece else f"({piece})"
             glyph = "," if atom and lit else ",\\:" if lit else ",/:" if atom else ",'"
             text, atom = f"{left}{glyph}{right}", atom and lit
-        return f"`$({text})" if self.symbols else text
+        # Parenthesised: a select phrase is cut at its commas.
+        return f"`$({text})" if self.symbols else f"({text})"
 
     def length_sql(self, node: exp.Length) -> str:
         if self.symbols:
             # LENGTH(NULL) is NULL, where count each string ` is 0.
             return f"{LENGTH} {self.operand(node.this)}"
-        return f"count each {self.operand(node.this)}"
+        # q has no null string: the empty one stands for NULL, of no length.
+        return f"{TEXT_LENGTH} {self.operand(node.this)}"
 
     def coalesce_sql(self, node: exp.Coalesce) -> str:
         # x^y is y with its nulls filled from x, so the first argument goes last.
         items = [node.this, *node.expressions]
+        if not self.symbols and any(is_text(i) for i in items):
+            # ^ cannot fill strings: the first non-empty, row by row.
+            text = self.text_rows(items[-1])
+            for item in reversed(items[:-1]):
+                text = f"{TEXT_FILL}[{self.text_rows(item)};{text}]"
+            return text
         return "^".join(self.operand(i) for i in reversed(items))
 
     def cast_sql(self, node: exp.Cast) -> str:
@@ -634,6 +754,10 @@ class QGenerator(Generator):
         from sqlglot_q.temporal import PARTS
 
         part = node.name.upper()
+        lambdas = {"DOW": DOW, "DAYOFWEEK": DOW, "DOY": DOY, "DAYOFYEAR": DOY}
+        lambdas |= {"QUARTER": QUARTER, "MILLISECOND": MILLISECOND, "MILLISECONDS": MILLISECOND}
+        if part in lambdas:
+            return f"{lambdas[part]} {self.operand(node.expression)}"
         if part not in PARTS:
             return self.refuse(f"EXTRACT({part}) has no q cast")
         return f"`{PARTS[part]}${self.operand(node.expression)}"
@@ -663,6 +787,9 @@ class QGenerator(Generator):
         from sqlglot_q.temporal import UNITS, span_text
 
         unit = node.text("unit").upper().rstrip("S")
+        if unit in TRUNC:
+            # A month is no fixed length: truncated through q's month type.
+            return f"{TRUNC[unit]} {self.operand(node.this)}"
         if unit not in UNITS or UNITS[unit] > UNITS["DAY"]:
             return self.refuse(f"DATE_TRUNC to {unit} has no q xbar")
         return f"{span_text(UNITS[unit])} xbar {self.sql(node.this)}"
@@ -684,13 +811,37 @@ class QGenerator(Generator):
             return f"{self.operand(known)} 0N"
 
         subject = node.this
-        text = value(default)
+        text_branches = not self.symbols and (
+            node.meta.get("text")
+            or any(is_text(b) for b in branches if b is not None)
+            or any(b in text_columns(node) for b in branches if b is not None)
+        )
+        if text_branches:
+            # ?[...] cannot pick between strings: each row picks with $[...].
+            text = self.text_rows(default) if default is not None else '(count i)#enlist ""'
+        else:
+            text = value(default)
         for when in reversed(node.args["ifs"]):
             cond = when.this
             if subject is not None:
                 cond = exp.EQ(this=subject.copy(), expression=cond.copy())
-            text = f"?[{self.condition(cond)};{value(when.args['true'])};{text}]"
+            if text_branches:
+                then = self.text_rows(when.args["true"])
+                text = f"{TEXT_PICK}[{self.condition(cond)};{then};{text}]"
+            else:
+                text = f"?[{self.condition(cond)};{value(when.args['true'])};{text}]"
         return text
+
+    def text_rows(self, node: exp.Expr) -> str:
+        """A text value as one per row: a literal is repeated for each."""
+        if is_text(node) or isinstance(node, exp.Null):
+            lit = '""' if isinstance(node, exp.Null) else self.chars(node.this)
+            return f"(count i)#enlist {lit}"
+        return self.operand(node)
+
+    def is_null(self, text: str) -> str:
+        """q true where the value is null; for text in string mode, empty."""
+        return f"null {text}" if self.symbols else f"{TEXT_NULL} {text}"
 
     def if_sql(self, node: exp.If) -> str:
         otherwise = node.args.get("false")
@@ -750,7 +901,7 @@ class QGenerator(Generator):
                 first = first.this
             items = list(first.expressions)
             terms, _ = order_terms(self, order, items, output_names(items), allow_source=False)
-            text = sort(terms, text)
+            text = sort(terms, text, self)
         return limited(self, node, text)
 
     def operand_query(self, node: exp.Expr) -> str:
@@ -984,6 +1135,19 @@ def constraints(node: exp.Expr) -> list[exp.Expr]:
     return [node]
 
 
+def text_columns(node: exp.Case) -> list[exp.Expr]:
+    """Columns the CASE's conditions compare with text: they are text."""
+    found = []
+    for when in node.args["ifs"]:
+        for cmp in when.this.find_all(exp.EQ, exp.NEQ, exp.Like):
+            sides = (cmp.this, cmp.expression)
+            if any(is_text(x) for x in sides):
+                found += [x for x in sides if isinstance(x, exp.Column)]
+    if node.this is not None and any(is_text(w.this) for w in node.args["ifs"]):
+        found.append(node.this)
+    return found
+
+
 def atomic_literal(node: exp.Expr) -> bool:
     return isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal)
 
@@ -1075,7 +1239,8 @@ QGenerator.TRANSFORMS = {
     exp.Corr: dyad("cor"),
     exp.CovarPop: dyad("cov"),
     exp.CovarSamp: dyad("scov"),
-    exp.CountIf: monad("sum"),
+    # COUNT_IF(c) is COUNT(*) FILTER (WHERE c): count i where c.
+    exp.CountIf: lambda self, node: f"count i where {self.condition(node.this)}",
     exp.AnyValue: monad("first", skip_nulls=True),
     # DuckDB parses ANY_VALUE(x) as IGNORE NULLS around it: first skips them.
     exp.IgnoreNulls: lambda self, node: (

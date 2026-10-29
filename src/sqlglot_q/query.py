@@ -252,7 +252,7 @@ def query(gen: QGenerator, node: exp.Select) -> str:
         if order:
             sort_result, sort_source = order_terms(gen, order, items, names, allow_source=True)
         if sort_source:
-            src = f"({sort(sort_source, src)})"
+            src = f"({sort(sort_source, src, gen)})"
         distinct = " distinct" if node.args.get("distinct") else ""
         excluded = items[0].args.get("except_") if star else None
         if excluded:
@@ -261,7 +261,7 @@ def query(gen: QGenerator, node: exp.Select) -> str:
             inner = f"select{distinct} from {src}{where}"
             text = f"delete {dropped} from {wrap(inner)}"
             if sort_result:
-                text = sort(sort_result, text)
+                text = sort(sort_result, text, gen)
             return limited(gen, node, text)
         if has_window(items):
             return windowed(gen, node, items, src, where, sort_result, sort_source, distinct)
@@ -275,7 +275,7 @@ def query(gen: QGenerator, node: exp.Select) -> str:
             sort_result, _ = order_terms(gen, order, items, names, allow_source=False)
 
     if sort_result:
-        text = sort(sort_result, text)
+        text = sort(sort_result, text, gen)
     return limited(gen, node, text)
 
 
@@ -310,7 +310,7 @@ def windowed(gen, node, items, src, where, sort_result, sort_source, distinct) -
         columns = " " + ", ".join(projection(gen, items))
         text = f"select{distinct}{columns} from {wrap(text)}"
     if sort_result:
-        text = sort(sort_result, text)
+        text = sort(sort_result, text, gen)
     return limited(gen, node, text)
 
 
@@ -498,7 +498,7 @@ def null_fix(ordered: exp.Ordered) -> str | None:
     return None
 
 
-def sort(terms: list[tuple], text: str) -> str:
+def sort(terms: list[tuple], text: str, gen=None) -> str:
     # xasc and xdesc are stable, so the least significant key sorts first and
     # each more significant one re-sorts what it left. A key whose nulls go
     # elsewhere is then re-sorted, stably, on whether it is null.
@@ -509,7 +509,19 @@ def sort(terms: list[tuple], text: str) -> str:
             runs[-1][0].append(name)
         else:
             runs.append(([name], desc, fix))
+    strings = gen is not None and not gen.symbols
     for cols, desc, fix in reversed(runs):
+        if strings:
+            # A list of strings does not sort in text order; its symbols do.
+            from sqlglot_q.generator import TEXT_KEY, TEXT_NULL
+
+            for col in reversed(cols):
+                grade = "idesc" if desc else "iasc"
+                text = f"{{x {grade} {TEXT_KEY} x`{col}}} {wrap(text)}"
+            if fix:
+                grade = "iasc" if fix == "last" else "idesc"
+                text = f"{{x {grade} {TEXT_NULL} x`{cols[0]}}} ({text})"
+            continue
         verb = "xdesc" if desc else "xasc"
         text = f"{''.join('`' + c for c in cols)} {verb} {wrap(text)}"
         if fix:

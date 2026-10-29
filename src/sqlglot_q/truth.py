@@ -54,7 +54,7 @@ def guarded(gen: QGenerator, sides: list[exp.Expr], text: str) -> str:
     for side in sides:
         if nullable(side) and side not in seen:
             seen.append(side)
-            guards.append(f"(not null {gen.operand(side)})")
+            guards.append(f"(not {gen.is_null(gen.operand(side))})")
     return "&".join([*guards, text]) if guards else text
 
 

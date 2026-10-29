@@ -71,7 +71,7 @@ def test_q_returns_what_duckdb_returns(answers, sql):
 REFUSED = [
     "SELECT LAG(x, 1, 0) OVER (ORDER BY o) FROM w",
     "SELECT SUM(x) OVER (ORDER BY o ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM w",
-    "SELECT NTILE(4) OVER (ORDER BY o) FROM w",
+    "SELECT NTH_VALUE(x, 2) OVER (ORDER BY o) FROM w",
     "SELECT g, SUM(SUM(x)) OVER () FROM w GROUP BY g",
     "SELECT RANK() OVER (PARTITION BY g) FROM w",
 ]

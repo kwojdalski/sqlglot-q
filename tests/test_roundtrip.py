@@ -26,6 +26,8 @@ import sqlglot
 from sqlglot.errors import ParseError
 
 from tests.integration.harness import q_binary, run_duckdb, run_q, same
+from tests.integration.test_calendar_text import DATA as CALENDAR_DATA
+from tests.integration.test_calendar_text import QUERIES as CALENDAR
 from tests.integration.test_functions import DATA as FUNCTIONED
 from tests.integration.test_functions import QUERIES as FUNCTIONS
 from tests.integration.test_nulls import DATA as NULL_DATA
@@ -37,6 +39,8 @@ from tests.integration.test_queries import QUERIES, STATEMENTS, TABLES
 from tests.integration.test_sqlglot_native import DATA as NATIVE_DATA
 from tests.integration.test_sqlglot_native import QUERIES as NATIVE
 from tests.integration.test_sqlglot_native import SCRIPTS
+from tests.integration.test_string_mode import QUERIES as STRING_MODE
+from tests.integration.test_string_mode import WRITE as STRING_WRITE
 from tests.integration.test_temporal import QUERIES as TEMPORAL
 from tests.integration.test_temporal import TICKS
 from tests.integration.test_windows import DATA as WINDOWED
@@ -78,6 +82,7 @@ SQL = (
     + [sql for script in SCRIPTS for sql in script]
     + NULLS
     + MORE_NULLS
+    + CALENDAR
 )
 Q_EXAMPLES = statements(FIXTURES / "q_examples.q")
 Q_REFUSED = statements(FIXTURES / "q_refused.q")
@@ -100,6 +105,7 @@ SELECTS += FUNCTIONS
 SELECTS += NATIVE
 SELECTS += [(sql, "ORDER BY" in sql) for sql in NULLS]
 SELECTS += [(sql, more_ordered(sql)) for sql in MORE_NULLS]
+SELECTS += [(sql, False) for sql in CALENDAR]
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
@@ -118,6 +124,8 @@ def test_sql_read_back_from_q_means_the_same(sql, ordered):
         if sql in NULLS
         else MORE_NULL_DATA
         if sql in MORE_NULLS
+        else CALENDAR_DATA
+        if sql in CALENDAR
         else TABLES
     )
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back
@@ -203,3 +211,11 @@ def test_a_dialects_own_functions_round_trip():
     q = sqlglot.transpile(sql, write=MyQ)[0]
     assert q == "select w:wavg[qty;px] from t"
     assert sqlglot.parse_one(q, read=MyQ).sql() == sql
+
+
+@pytest.mark.parametrize("sql", STRING_MODE, ids=STRING_MODE)
+def test_string_mode_round_trips(sql):
+    q1 = sqlglot.transpile(sql, read="duckdb", write=STRING_WRITE)[0]
+    sql1 = to_sql(q1)
+    q2 = sqlglot.transpile(sql1, read="duckdb", write=STRING_WRITE)[0]
+    assert q2 == q1, f"\nsql:  {sql}\nq1:   {q1}\nsql1: {sql1}\nq2:   {q2}"

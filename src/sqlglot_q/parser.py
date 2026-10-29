@@ -23,18 +23,38 @@ from sqlglot.errors import ParseError
 
 from sqlglot_q.canonical import canonical
 from sqlglot_q.generator import (
+    CUME_DIST,
+    DOW,
+    DOY,
     HALF_EVEN,
     INT_DIV,
     LEFT,
     LENGTH,
+    MILLISECOND,
     MOD,
     NAME,
     NON_NULL,
+    NTILE,
     NULLS,
+    PERCENT_RANK,
+    QUARTER,
+    REPLACE,
     RESERVED,
+    REVERSE,
     RIGHT,
     ROUND,
     ROUND_TO,
+    SUBSTRING,
+    SUBSTRING_FROM,
+    TEXT_AGG,
+    TEXT_FILL,
+    TEXT_KEY,
+    TEXT_LENGTH,
+    TEXT_MAX,
+    TEXT_MIN,
+    TEXT_NULL,
+    TEXT_PICK,
+    TRUNC,
     TYPES,
 )
 from sqlglot_q.temporal import CASTS as PART_CASTS
@@ -135,7 +155,7 @@ TOKEN = re.compile(
   | (?P<num>0[NnWw][a-z]?|\d+(?:\.\d*)?(?:e[+-]?\d+)?[a-z]?|\.\d+(?:e[+-]?\d+)?[a-z]?)
   | (?P<sym>(?:`[A-Za-z0-9_.:]*)+)
   | (?P<name>[A-Za-z][A-Za-z0-9_.]*)
-  | (?P<op>~\\:|,'|,\\:|,/:|<>|<=|>=|[=<>+\-*%&|^#~,!@$?_])
+  | (?P<op>~\\:|~'|,'|,\\:|,/:|=/:|<>|<=|>=|[=<>+\-*%&|^#~,!@$?_])
   | (?P<punct>[()\[\];:])
     """,
     re.VERBOSE,
@@ -162,6 +182,8 @@ def tokenize(text: str) -> list[Token]:
                 j += 1
                 if depth == 0:
                     break
+            if j < len(text) and text[j] == "'":
+                j += 1  # {...}' : the lambda applied each
             tokens.append(Token("lambda", text[i:j], spaced=spaced))
             i = j
             continue
@@ -453,6 +475,8 @@ class Statement:
             return arg
         if word == "not":
             return exp.Not(this=arg)
+        if word == "any" and isinstance(arg, EqEach):
+            return exp.In(this=arg.this, expressions=arg.args["items"])
         if word == "any" and isinstance(arg, exp.Is) and isinstance(arg.this, Exec):
             return NoNulls(this=arg.this)
         if word == "null":
@@ -469,6 +493,14 @@ class Statement:
             return exp.Coalesce(this=total, expressions=[exp.Literal.number(0)])
         if word == "first" and isinstance(arg, exp.GroupConcat):
             return arg
+        if word == "first" and isinstance(arg, Enlisted) and isinstance(arg.this, exp.GroupConcat):
+            return arg.this  # first enlist: the text form
+        if word == "first" and isinstance(arg, TextOrder) and arg.args.get("nonnull"):
+            return aggregate(exp.Min, arg.this)
+        if word == "last" and isinstance(arg, TextOrder) and not arg.args.get("nonnull"):
+            return aggregate(exp.Max, arg.this)
+        if word == "first" and isinstance(bare(arg), exp.Column):
+            return QCall(this=arg, fn="first")  # FIRST_VALUE, in a window stage
         if word == "first" and isinstance(arg, QCall) and arg.args["fn"] == "asc":
             inner = arg.this
             if isinstance(inner, NonNull):
@@ -498,6 +530,8 @@ class Statement:
             return MONADIC[word](this=arg)
         if word in WINDOW_MONADS or word == "asc":
             return QCall(this=arg, fn=word)
+        if word == "count" and is_query(arg):
+            return CountRows(this=arg)
         if word == "count":
             if isinstance(arg, exp.Column) and arg.name == "i":
                 return exp.Count(this=exp.Star())
@@ -548,6 +582,11 @@ class Statement:
         arg = self.expr(stop)
         if type_name == "" and isinstance(arg, exp.Cast):
             return arg  # `$string x
+        if type_name == "" and isinstance(bare(arg), (exp.Column, Chars)):
+            # (`$w)>`$"b": text compared as symbols, in the text's order
+            return literal(bare(arg))
+        if type_name == "" and isinstance(bare(arg), exp.Concat):
+            return bare(arg)  # `$(a,'b): the joined text, as a symbol
         if type_name == "" and isinstance(bare(arg), (Joins, exp.Trim)):
             arg = bare(arg)
             return concat(self, arg) if isinstance(arg, Joins) else arg
@@ -561,6 +600,32 @@ class Statement:
         return exp.Cast(this=arg, to=exp.DataType(this=kind))
 
     def lambda_call(self, text: str, stop: set[str]) -> exp.Expr:
+        if text == TEXT_NULL:
+            return exp.Is(this=self.expr(stop), expression=exp.Null())  # empty: NULL
+        if text == TEXT_LENGTH:
+            return exp.Length(this=self.expr(stop))
+        if text in (TEXT_PICK, TEXT_FILL):
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            args = [literal(per_row(a)) for a in args]
+            if text == TEXT_FILL and len(args) == 2:
+                rest = args[1].expressions if isinstance(args[1], exp.Coalesce) else []
+                head = args[1].this if isinstance(args[1], exp.Coalesce) else args[1]
+                return exp.Coalesce(this=args[0], expressions=[head, *rest])
+            if text == TEXT_PICK and len(args) == 3:
+                cond, then, other = args
+                return self.case_of(cond, then, other)
+            self.fail("a text lambda with the wrong arguments")
+        if text.startswith("{x i") and TEXT_SORT.match(text):
+            m = TEXT_SORT.match(text)
+            target = self.expr(stop)
+            if m[2] == TEXT_NULL:  # {x iasc TEXT_NULL x`k}: nulls last (or first)
+                return null_order(self, target, m[3], first=m[1] == "idesc")
+            return ordered(self, exp.Literal.string(m[3]), target, desc=m[1] == "idesc")
         nulls = NULL_ORDER.match(text)
         if nulls:
             # {x iasc null x`k} r: r with k's nulls moved last (or, with
@@ -568,6 +633,42 @@ class Statement:
             # A lambda applies to all of the expression on its right.
             target = self.expr(stop)
             return null_order(self, target, nulls[2], first=nulls[1] == "idesc")
+        if text in PART_LAMBDAS:
+            return exp.Extract(this=exp.var(PART_LAMBDAS[text]), expression=self.expr(stop))
+        if text in TRUNC_LAMBDAS:
+            unit = exp.var(TRUNC_LAMBDAS[text])
+            return exp.TimestampTrunc(this=self.expr(stop), unit=unit)
+        if text in REVERSE:
+            return exp.Reverse(this=self.expr(stop))
+        if text in (PERCENT_RANK, CUME_DIST):
+            return QCall(
+                this=self.expr(stop), fn="percent_rank" if text == PERCENT_RANK else "cume_dist"
+            )
+        if text in (*REPLACE, *SUBSTRING, *SUBSTRING_FROM, NTILE):
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            args = [literal(a) for a in args]
+            if text in REPLACE and len(args) == 3:
+                return exp.Replace(this=args[0], expression=args[1], replacement=args[2])
+            if text in SUBSTRING and len(args) == 3:
+                return exp.Substring(this=args[0], start=args[1], length=args[2])
+            if text in SUBSTRING_FROM and len(args) == 2:
+                return exp.Substring(this=args[0], start=args[1])
+            if text == NTILE and len(args) == 2:
+                return QCall(this=args[1], fn="ntile", n=args[0])
+            self.fail("a lambda with the wrong arguments")
+        if text in (TEXT_MIN_FN, TEXT_MAX_FN):
+            return TextOrder(this=self.expr(stop), nonnull=text == TEXT_MIN_FN)
+        if TEXT_AGG_TEXT.match(text):
+            sep = TEXT_AGG_TEXT.match(text)[1]
+            self.expect("[")
+            arg = self.expr(set())
+            self.expect("]")
+            return exp.GroupConcat(this=arg, separator=exp.Literal.string(unescape(sep)))
         agg = STRING_AGG_TEXT.match(text)
         if agg:
             self.expect("[")
@@ -632,6 +733,8 @@ class Statement:
         inner = items[0]
         if is_query(inner) or isinstance(inner, (exp.Subquery, Sorted, Renamed)):
             return inner
+        if isinstance(inner, Joins):
+            return concat(self, inner)  # (w,'v): text joined, in string mode
         return exp.Paren(this=inner)
 
     def table_literal(self) -> exp.Expr:
@@ -646,6 +749,18 @@ class Statement:
                 self.next()
         self.expect(")")
         return TableLiteral(columns=cols, values=values)
+
+    def case_of(self, cond, then, other) -> exp.Expr:
+        pipes = dpipe_of(cond, then, other)
+        if pipes is not None:
+            return pipes
+        then = exp.Null() if is_empty_text(then) else then
+        other = None if is_empty_text(other) else other
+        ifs = [exp.If(this=cond, true=then)]
+        if isinstance(other, exp.Case) and other.this is None:
+            ifs += other.args["ifs"]
+            other = other.args.get("default")
+        return exp.Case(ifs=ifs, default=other)
 
     def conditional(self) -> exp.Expr:
         self.expect("[")
@@ -697,6 +812,9 @@ class Statement:
         return Joined(this=left, expression=right, keys=keys.value, side="LEFT", method="ASOF")
 
     def dyad(self, op: str, left: exp.Expr, right: exp.Expr) -> exp.Expr:
+        if op == "<" and isinstance(left, exp.Literal) and left.this == "0":
+            if isinstance(right, CountRows):
+                return exp.Exists(this=right.this)  # 0<count (select ...)
         if op in ("=", "<>") and any(chars(n) for n in (left, right)):
             # = on a string compares it character by character; SQL's = on
             # strings is q's ~\: (match each).
@@ -731,11 +849,16 @@ class Statement:
             return node(this=left, expression=right)
         if op in GLYPHS:
             return GLYPHS[op](this=left, expression=right)
-        if op in (",'", ",\\:", ",/:", ",") and (text_part(left) or text_part(right)):
+        if op in (",'", ",\\:", ",/:") or (op == "," and (text_part(left) or text_part(right))):
             parts = []
             for side in (bare(left), bare(right)):
                 parts += side.expressions if isinstance(side, Joins) else [side]
             return Joins(expressions=parts)
+        if op == "#" and isinstance(bare(left), exp.Count) and isinstance(right, (Enlisted, Chars)):
+            inner = right.this if isinstance(right, Enlisted) else right
+            return PerRow(this=inner)
+        if op == "=/:" and isinstance(right, Rows):
+            return EqEach(this=left, items=right.args["items"])
         if op == "xexp":
             return exp.Pow(this=left, expression=right)
         if op == "xlog":
@@ -782,6 +905,8 @@ class Statement:
             return exp.Coalesce(this=first, expressions=[*items, left])
         if op == "~\\:":
             return exp.EQ(this=left, expression=literal(right))
+        if op == "~'":
+            return exp.EQ(this=left, expression=right)  # strings matched row by row
         if op == "in":
             if isinstance(right, exp.Subquery):
                 return exp.In(this=left, query=right)
@@ -1033,6 +1158,24 @@ class NullsAsNull(exp.Expression):
 
 
 class NonNull(exp.Expression):
+    arg_types = {"this": True}
+
+
+class EqEach(exp.Expression):
+    arg_types = {"this": True, "items": True}
+
+
+class CountRows(exp.Expression):
+    arg_types = {"this": True}
+
+
+class TextOrder(exp.Expression):
+    arg_types = {"this": True, "nonnull": False}
+
+
+class PerRow(exp.Expression):
+    """(count i)#enlist v: the literal v on every row."""
+
     arg_types = {"this": True}
 
 
@@ -1354,6 +1497,10 @@ def inserted(parser: Statement, table: exp.Expr, values: exp.Expr) -> exp.Expr:
 
 
 HELPERS = (
+    TextOrder,
+    PerRow,
+    EqEach,
+    CountRows,
     NoNulls,
     NullsAsNull,
     NonNull,
@@ -1465,6 +1612,12 @@ def concat(parser, joins) -> exp.Expr:
     parts = []
     for part in joins.expressions:
         part = bare(part)
+        if isinstance(part, Joins):
+            parts += concat(parser, part).expressions
+            continue
+        if isinstance(part, exp.Concat):
+            parts += part.expressions
+            continue
         if isinstance(part, exp.Cast) and part.to.this == exp.DataType.Type.VARCHAR:
             part = part.this  # string x
         if isinstance(part, Chars):
@@ -1589,3 +1742,62 @@ def nullable_side(node: exp.Expr) -> bool:
     if isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal):
         return False
     return not (isinstance(node, exp.Cast) and isinstance(node.this, exp.Literal))
+
+
+PART_LAMBDAS = {DOW: "DOW", DOY: "DOY", QUARTER: "QUARTER", MILLISECOND: "MILLISECOND"}
+TRUNC_LAMBDAS = {text: unit for unit, text in TRUNC.items()}
+
+
+TEXT_MIN_FN = TEXT_MIN.removeprefix("first ")
+TEXT_MAX_FN = TEXT_MAX.removeprefix("last ")
+TEXT_SORT = re.compile(
+    r"\{x (iasc|idesc) ("
+    + re.escape(TEXT_KEY)
+    + "|"
+    + re.escape(TEXT_NULL)
+    + r") x`([A-Za-z][A-Za-z0-9_]*)\}\Z"
+)
+TEXT_AGG_TEXT = re.compile(
+    re.escape(TEXT_AGG.format(sep="SEP")).replace(re.escape("(SEP)"), r'\("((?:[^"\\]|\\.)*)"\)')
+    + r"\Z"
+)
+
+
+def per_row(node):
+    return node.this if isinstance(node, PerRow) else node
+
+
+def is_empty_text(node) -> bool:
+    node = bare(node) if node is not None else None
+    return (
+        isinstance(node, (Chars,))
+        and node.this == ""
+        or (isinstance(node, exp.Literal) and node.is_string and node.this == "")
+    )
+
+
+def dpipe_of(cond, then, other):
+    """{$[x;y;z]}'[(null a)|null b;"";a,'b], string mode's a || b: NULL when
+    a side is."""
+    other = bare(other) if other is not None else None
+    if not (is_empty_text(then) and isinstance(other, exp.Concat)):
+        return None
+    guards, stack = [], [bare(cond)]
+    while stack:
+        part = bare(stack.pop())
+        if isinstance(part, (exp.Or, exp.Greatest)):
+            stack += [part.this, *([part.expression] if part.expression else part.expressions)]
+        elif isinstance(part, exp.Is):
+            guards.append(bare(part.this))
+        else:
+            return None
+    columns = []
+    for p in other.expressions:
+        if not isinstance(p, exp.Literal) and p not in columns:
+            columns.append(p)
+    if sorted(map(repr, guards)) != sorted(map(repr, columns)):
+        return None
+    node = other.expressions[0]
+    for p in other.expressions[1:]:
+        node = exp.DPipe(this=node, expression=p, safe=True)
+    return node
