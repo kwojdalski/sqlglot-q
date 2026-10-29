@@ -18,11 +18,33 @@ The dialect is registered through sqlglot's `sqlglot.dialects` entry point as
 
 ## Install
 
+sqlglot-q is not on PyPI yet, so install it from GitHub, next to sqlglot:
+
 ```sh
-pip install sqlglot-q          # or: uv add sqlglot-q
+pip install sqlglot "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q"
+# or, with uv
+uv add sqlglot "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q"
+# or, from a local clone, editable
+pip install -e path/to/sqlglot-q
 ```
 
-Requires Python 3.11+ and sqlglot 30+.
+It needs Python 3.11+ and sqlglot 30+. Installing it is all the setup there
+is: sqlglot finds the dialect through the package's entry point the first
+time `"q"` is asked for. To check:
+
+```sh
+python -c "import sqlglot; print(sqlglot.transpile('SELECT a FROM t WHERE b > 1', write='q'))"
+# ['select a from t where b>1']
+```
+
+**Use the pure-Python sqlglot, not `sqlglot[c]`.** The compiled build
+refuses subclasses of its generator, so with it installed every transpile to
+q fails with `TypeError: interpreted classes cannot inherit from compiled`.
+This applies to every sqlglot plugin dialect. If you have it, remove the
+compiled part with `pip uninstall sqlglotc`.
+
+Running the q that comes out needs q itself (kdb+, any edition with a
+licence, such as the free personal one). The translation does not.
 
 ## What it translates
 
@@ -53,19 +75,34 @@ sqlglot.transpile("SELECT a FROM t WHERE s = 'ab'", write="q", string_literals="
 ## Scoring scikit-learn models in kdb+ with orbital
 
 [orbital](https://github.com/posit-dev/orbital) exports a fitted scikit-learn
-pipeline as SQL. It compiles through ibis, which has no q backend, so export
-DuckDB SQL and transpile that:
+pipeline as SQL, so a model trained in Python can be scored inside kdb+.
+
+```sh
+pip install "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q" orbital scikit-learn pandas
+```
+
+orbital compiles through ibis, which has no q backend, so passing
+`dialect="q"` to orbital does not work. Export DuckDB SQL and transpile that:
 
 ```python
 import orbital, sqlglot
 
-pipeline = orbital.parse_pipeline(model, features=orbital.types.guess_datatypes(df))
+pipeline = orbital.parse_pipeline(model, features=orbital.types.guess_datatypes(X))
 sql = orbital.export_sql("t", pipeline, dialect="duckdb")
 q = sqlglot.transpile(sql, read="duckdb", write="q")[0]
 ```
 
-Linear and logistic regression, decision trees, gradient boosting and random
-forests are tested to score identically in q and DuckDB
+`q` is one q expression over a table `t` with the model's feature columns;
+run it in a q process that holds `t`, and it returns one row of scores per
+row of `t`. Output columns orbital names `output_probability.0` and so on
+keep those names (q renames them with `xcol` after the select).
+
+[`examples/orbital_demo.py`](examples/orbital_demo.py) does the whole round
+trip. It fits a logistic regression on iris, translates it, scores the data
+in q, and compares the result with scikit-learn's own `predict_proba`. The
+probabilities agree to 2e-16 and every label matches. Linear and logistic
+regression, decision trees, gradient boosting and random forests are also
+tested to score identically in q and DuckDB
 (`tests/integration/test_orbital.py`).
 
 ## Command line

@@ -50,6 +50,7 @@ both right.
 | `src/sqlglot_q/cli.py` | the `sqlglot-q` command |
 | `tests/test_q.py` | the q text each construct becomes |
 | `tests/integration/` | q against DuckDB on the same data; `harness.py` runs both |
+| `examples/orbital_demo.py` | scikit-learn model to orbital to q, scored and checked against predict_proba |
 | `docs/design.md` | why the generator owns dispatch, and every SQL/q difference handled |
 
 The plugin is registered in `pyproject.toml` under
