@@ -27,6 +27,7 @@ from sqlglot_q.generator import (
     ANY_FILL,
     BOOL_AND,
     BOOL_OR,
+    BUCKET,
     CUME_DIST,
     DOW,
     DOY,
@@ -711,6 +712,15 @@ class Statement:
             if node is None:
                 self.fail("a lambda with the wrong arguments")
             return node
+        if text == BUCKET and self.is_("["):
+            self.expect("[")
+            width = self.expr(set())
+            self.expect(";")
+            value = self.expr(set())
+            self.expect("]")
+            if not isinstance(width, exp.Interval):
+                self.fail("a bucket is read with a timespan width")
+            return exp.DateBin(this=width, expression=value)
         if text == TEXT_SPREAD and self.is_("["):
             self.expect("[")
             self.expr(set())  # i: the partition's rows
@@ -1036,6 +1046,16 @@ class Statement:
         if op in ("&", "and") and isinstance(bare(right), NoNulls):
             # (not x in S)&not any null S: SQL's x NOT IN (S)
             return left
+        flag = lambda n: boolean(n) or isinstance(bare(n), exp.Column)  # noqa: E731
+        if (
+            op in ("or", "and")
+            and not (boolean(left) and boolean(right))
+            and flag(left)
+            and flag(right)
+        ):
+            # The generator's f and a>2: a column taken as a condition.
+            kind = exp.And if op == "and" else exp.Or
+            return kind(this=left, expression=right)
         if op in ("|", "&", "or", "and") and not (boolean(left) and boolean(right)):
             # | and & are max and min; only between conditions are they OR
             # and AND. max skips a null as GREATEST does; & does not, so a
@@ -1100,6 +1120,17 @@ class Statement:
             return QCall(this=right, fn="find")
         if op == "xbar":
             if isinstance(left, exp.Interval):
+                from sqlglot_q.temporal import UNITS, nanoseconds
+
+                ns = nanoseconds(left)
+                unit = next((u for u, n in UNITS.items() if n == ns and u != "DAY"), None)
+                timestamp = isinstance(right, exp.Cast) and right.to.this in (
+                    exp.DataType.Type.TIMESTAMP,
+                    exp.DataType.Type.DATETIME,
+                )
+                if unit is not None and timestamp:
+                    # 0D01 xbar `timestamp$x: the generator's DATE_TRUNC('hour', x).
+                    return exp.TimestampTrunc(this=right.this, unit=exp.var(unit))
                 return exp.DateBin(this=left, expression=right)
             # n xbar x is x rounded down to a multiple of n.
             return exp.Mul(

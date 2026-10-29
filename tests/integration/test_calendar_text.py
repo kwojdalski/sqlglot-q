@@ -68,6 +68,23 @@ QUERIES = [
     "SELECT a, PERCENT_RANK() OVER (ORDER BY n) AS p FROM t",
     "SELECT a, CUME_DIST() OVER (ORDER BY n) AS c FROM t",
     "SELECT a, COUNT(*) OVER () AS c, ROW_NUMBER() OVER () AS r FROM t",
+    # Months on a timestamp keep its time of day.
+    "SELECT a, ts + INTERVAL 1 MONTH AS b, ts - INTERVAL 1 YEAR AS c FROM t",
+    # A date is its own bucket: xbar of a date by a timespan is no day.
+    "SELECT a, TIME_BUCKET(INTERVAL '1 day', d) AS b, TIME_BUCKET(INTERVAL '1 hour', ts) AS c "
+    "FROM t",
+    # Parts and differences of timestamps.
+    "SELECT a, HOUR(ts) AS h, MINUTE(ts) AS m, SECOND(ts) AS s FROM t",
+    "SELECT a, EXTRACT(epoch FROM ts) AS e, EPOCH(d) AS g FROM t",
+    "SELECT a, EXTRACT(week FROM d) AS w FROM t",
+    "SELECT a, DATE_DIFF('hour', ts, TIMESTAMP '2024-01-16 00:00:00') AS h FROM t",
+    "SELECT a, DATE_DIFF('minute', TIMESTAMP '2024-01-15 09:00:00', ts) AS m, "
+    "DATE_DIFF('second', TIMESTAMP '2024-01-15 09:00:00', ts) AS s FROM t",
+    "SELECT a, DATE_DIFF('quarter', d, DATE '2025-01-01') AS q FROM t",
+    # Text as SQL writes a timestamp and a whole float.
+    "SELECT a, CAST(x AS VARCHAR) AS z, CAST(ts AS VARCHAR) AS w FROM t",
+    # AND of a boolean column as a value.
+    "SELECT a, f AND a > 2 AS z, f OR x < 0 AS w FROM t",
 ]
 
 

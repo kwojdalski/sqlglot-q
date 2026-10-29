@@ -23,7 +23,10 @@ FIND = "{n:count y;$[count w:where y~/:n sublist/:(til count x)_\\:x;1+first w;0
 DAYS = ("Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
 # x plus y months, the day clamped to the month's last (Jan 31 + 1 is Feb 29),
 # the time of day kept; a timestamp, as SQL's date + interval is.
-ADD_MONTHS = "{m:y+`month$x;f:`date$m;`timestamp$(x-`date$x)+f+((-1+`date$m+1)-f)&(`dd$x)-1}"
+ADD_MONTHS = (
+    "{m:y+`month$x;f:`date$m;(`timestamp$f+((-1+`date$m+1)-f)&(`dd$x)-1)"
+    "+(`timestamp$x)-`timestamp$`date$x}"
+)
 
 
 # The z-th part of x split on y (on each character when y is ''), from 1 or,
@@ -172,6 +175,35 @@ CALLS = [
         '{`${$[null x;"";enlist "c"$x]} each x}',
         '{{$[null x;"";enlist "c"$x]} each x}',
         keys=("expressions",),
+    ),
+    # DATE_DIFF in hours, minutes and seconds: the boundaries crossed, each
+    # side truncated first; and in quarters, of the months' quarters.
+    *(
+        Call(
+            exp.DateDiff,
+            f"{{((`long$({span} xbar `timestamp$x)-{span} xbar `timestamp$y)) div {ns}}}",
+            keys=("this", "expression"),
+            fixed={"unit": unit},
+            ignored=("date_part_boundary",),
+        )
+        for unit, span, ns in (
+            ("HOUR", "0D01:00:00", 3_600_000_000_000),
+            ("MINUTE", "0D00:01:00", 60_000_000_000),
+            ("SECOND", "0D00:00:01", 1_000_000_000),
+        )
+    ),
+    Call(
+        exp.DateDiff,
+        "{((`int$`month$x) div 3)-(`int$`month$y) div 3}",
+        keys=("this", "expression"),
+        fixed={"unit": "QUARTER"},
+        ignored=("date_part_boundary",),
+    ),
+    # EPOCH: seconds since 1970, a float as SQL's; whole seconds and the rest
+    # apart, as 1.7e18 nanoseconds are past a float's exact integers.
+    Call(
+        exp.TimeToUnix,
+        "{n:(`long$`timestamp$x)-`long$1970.01.01D0;(n div 1000000000)+(n mod 1000000000)%1e9}",
     ),
     # Aggregates, each over the non-null values and NULL over none.
     Call(

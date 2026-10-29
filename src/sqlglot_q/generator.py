@@ -98,6 +98,8 @@ TEXT_MAX = f"last {{x iasc {TEXT_KEY} x}}"
 TEXT_PICK = "{$[x;y;z]}'"  # CASE over text: ?[...] cannot pick strings
 TEXT_LENGTH = "{?[0=count each x;0N;count each x]}"
 TEXT_FILL = "{$[0=count x;y;x]}'"  # COALESCE over text
+# TIME_BUCKET: x xbar y, but a date (of a width dividing a day) as it is.
+BUCKET = "{$[14h=abs type y;y;x xbar y]}"
 # String mode, where a column's type is not known: strings (and a string)
 # as symbols, which compare in text order; anything else as it is. And
 # COALESCE of two columns: the text fill for strings, ^ for the rest.
@@ -175,11 +177,20 @@ TYPES = {
     exp.DataType.Type.TIME: ("time", "`time$()"),
 }
 INTEGERS = {"short", "int", "long"}
-# CAST(x AS VARCHAR): q's string, but a date as SQL writes it (2024-01-31,
-# not 2024.01.31) and a boolean as true or false (not 1 or 0).
+# CAST(x AS VARCHAR): text as SQL writes it, a date 2024-01-31 (not
+# 2024.01.31), a boolean true (not 1), a timestamp 2024-01-31 09:30:01.25
+# (its fraction's trailing zeros dropped), a whole float 9.0 (not 9);
+# anything else as q's string.
+TEXT_TS = (
+    '{$[null x;"";(ssr[10#s;".";"-"])," ",'
+    '{$[all "0"=-9#x;-10_x;(neg sum mins reverse "0"=x)_x]} 11_s:string x]}'
+)
+TEXT_FLOAT = '{$[null x;"";any (s:string x) in ".en";s;s,".0"]}'
 TEXT_OF = (
     '{$[-14h=t:type x;ssr[string x;".";"-"];14h=t;ssr[;".";"-"] each string x;'
-    '-1h=t;$[x;"true";"false"];1h=t;("false";"true") x;string x]}'
+    '-1h=t;$[x;"true";"false"];1h=t;("false";"true") x;'
+    f"-12h=t;{TEXT_TS} x;12h=t;{TEXT_TS} each x;-9h=t;{TEXT_FLOAT} x;9h=t;{TEXT_FLOAT} each x;"
+    "string x]}"
 )
 # LEFT JOIN: ej's matches, and the left rows with none (uj gives them the
 # right's columns, null).
@@ -562,7 +573,18 @@ class QGenerator(Generator):
         return f"{self.operand(left)}{glyph}{self.operand(right)}"
 
     eq_sql = neq_sql = gt_sql = gte_sql = lt_sql = lte_sql = binary
-    add_sql = sub_sql = mul_sql = div_sql = and_sql = or_sql = binary
+    add_sql = sub_sql = mul_sql = div_sql = binary
+
+    def connector(self, node: exp.Expr) -> str:
+        sides = (node.this, node.expression)
+        if all(condition_like(x) for x in sides):
+            return self.binary(node)
+        # f AND a > 2 with f a column: q's and/or, which are & and |, but
+        # say a column is a condition when read back (f&x reads as LEAST).
+        word = "and" if isinstance(node, exp.And) else "or"
+        return f"{self.operand(sides[0])} {word} {self.operand(sides[1])}"
+
+    and_sql = or_sql = connector
 
     def nullsafeeq_sql(self, node) -> str:
         # q's = is already null-safe: 0N=0N is true, 0N=1 false.
@@ -1029,6 +1051,10 @@ class QGenerator(Generator):
         lambdas |= {"QUARTER": QUARTER, "MILLISECOND": MILLISECOND, "MILLISECONDS": MILLISECOND}
         if part in lambdas:
             return f"{lambdas[part]} {self.operand(node.expression)}"
+        if part in ("EPOCH", "WEEK"):
+            # As EPOCH(x) and WEEK(x), the lambdas of scalars.py.
+            kind = exp.TimeToUnix if part == "EPOCH" else exp.Week
+            return self.sql(kind(this=node.expression.copy()))
         if part not in PARTS:
             return self.refuse(f"EXTRACT({part}) has no q cast")
         return f"`{PARTS[part]}${self.operand(node.expression)}"
@@ -1036,10 +1062,17 @@ class QGenerator(Generator):
     def date_part(self, node: exp.Expr) -> str:
         from sqlglot_q.temporal import PARTS
 
-        part = {exp.Year: "YEAR", exp.Month: "MONTH", exp.Day: "DAY"}[type(node)]
+        part = {
+            exp.Year: "YEAR",
+            exp.Month: "MONTH",
+            exp.Day: "DAY",
+            exp.Hour: "HOUR",
+            exp.Minute: "MINUTE",
+            exp.Second: "SECOND",
+        }[type(node)]
         return f"`{PARTS[part]}${self.operand(node.this)}"
 
-    year_sql = month_sql = day_sql = date_part
+    year_sql = month_sql = day_sql = hour_sql = minute_sql = second_sql = date_part
 
     def datebin_sql(self, node: exp.DateBin) -> str:
         from sqlglot_q.temporal import DAY, nanoseconds
@@ -1052,7 +1085,9 @@ class QGenerator(Generator):
             # q counts buckets from 2000.01.01, DuckDB from 2000-01-03: they
             # agree only for widths that divide a day.
             return self.refuse("TIME_BUCKET is translated for widths that divide a day")
-        return f"{self.sql(width)} xbar {self.sql(node.expression)}"
+        # A date is its own bucket for a width that divides a day; xbar of a
+        # date by a timespan counts its days as nanoseconds.
+        return f"{BUCKET}[{self.sql(width)};{self.sql(node.expression)}]"
 
     def datetrunc_sql(self, node: exp.DateTrunc) -> str:
         # DATE_TRUNC of a DATE (sqlglot's DateTrunc): DuckDB's answer is the
@@ -1073,7 +1108,8 @@ class QGenerator(Generator):
         if unit not in UNITS or UNITS[unit] > UNITS["DAY"]:
             return self.refuse(f"DATE_TRUNC to {unit} has no q xbar")
         arg = node.this
-        if not (isinstance(arg, exp.Cast) and arg.to.this == exp.DataType.Type.TIMESTAMP):
+        timestamps = (exp.DataType.Type.TIMESTAMP, exp.DataType.Type.DATETIME)
+        if not (isinstance(arg, exp.Cast) and arg.to.this in timestamps):
             # A timespan xbar of a date counts in days from 2000.01.01 as if
             # they were nanoseconds: a timestamp first.
             arg = exp.Cast(this=arg.copy(), to=exp.DataType.build("TIMESTAMP"))
@@ -1490,6 +1526,15 @@ def flatten_dpipe(node: exp.Expr) -> list[exp.Expr]:
 
 def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
+
+
+def condition_like(node: exp.Expr) -> bool:
+    """A comparison, a test or a connective of them: true or false as it reads."""
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return isinstance(
+        node, (exp.Predicate, exp.Connector, exp.Not, exp.Boolean, exp.Exists, exp.Escape)
+    )
 
 
 def atomic_value(node: exp.Expr) -> bool:

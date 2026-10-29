@@ -195,11 +195,9 @@ class TestFunctions(Validator):
             "SELECT CAST(a AS BIGINT) FROM t",
             "select `long${f:floor x+0.5;f-(x=f-0.5)&1=f mod 2} a from t",
         )
-        self.validate(
-            "SELECT CAST(a AS VARCHAR) FROM t",
-            'select `${$[-14h=t:type x;ssr[string x;".";"-"];14h=t;ssr[;".";"-"] each string x;'
-            '-1h=t;$[x;"true";"false"];1h=t;("false";"true") x;string x]} a from t',
-        )
+        from sqlglot_q.generator import TEXT_OF
+
+        self.validate("SELECT CAST(a AS VARCHAR) FROM t", f"select `${TEXT_OF} a from t")
 
     def test_scalars(self):
         self.validate("SELECT COALESCE(a, b, 0) FROM t", "select 0^b^a from t")
@@ -243,7 +241,7 @@ class TestTemporal(Validator):
     def test_buckets_are_xbar(self):
         self.validate(
             "SELECT TIME_BUCKET(INTERVAL '5 minutes', ts) AS b FROM t",
-            "select b:0D00:05:00.000000000 xbar ts from t",
+            "select b:{$[14h=abs type y;y;x xbar y]}[0D00:05:00.000000000;ts] from t",
         )
         self.validate(
             "SELECT DATE_TRUNC('hour', ts) AS h FROM t",

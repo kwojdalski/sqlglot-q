@@ -218,16 +218,15 @@ becomes `0!select ... by`); the second must not.
   start or end with one is refused; use `string_literals="string"`.
 - In q a null symbol is the empty symbol, so SQL's `''` and `NULL` text are
   one value there.
-- `CAST(x AS VARCHAR)` of a float is q's `string`, which prints with q's
-  display precision (7 significant digits by default) and drops a `.0`:
-  `0.0` is `"0"` where SQL writes `'0.0'`.
+- `CAST(x AS VARCHAR)` of a float is q's `string` (a whole one with SQL's
+  `.0`), which prints with q's display precision, 7 significant digits by
+  default, where SQL prints the shortest exact form.
 - q booleans cannot be null, so SQL's NULL booleans have no q form.
 - Reading q: plain `max x` and `min x` over no values are q's infinities,
   which SQL cannot state without the column's type; running q functions
   without a sort ahead of them (`update s:sums x by g from t`) depend on q's
   row order and are refused; `count distinct x` counts a null as a value in q
   and is refused; `fby` is not read.
-- `CAST(x AS VARCHAR)` of a timestamp is q's text, `2024.01.31D10:00:...`.
 - `MODE`, `ARG_MAX` and `ARG_MIN` break ties by the first row in q; DuckDB's
   choice among ties is its own.
 - `> ALL`/`< ANY` under a `NOT` or outside a `WHERE`/`HAVING` are refused,
