@@ -66,6 +66,20 @@ QUERIES = [
     "SELECT g FROM t INTERSECT SELECT 'a'",
     "SELECT g FROM t UNION SELECT 'zz'",
     "SELECT g, n FROM t WHERE g = 'a' UNION ALL SELECT 'q', 99",
+    # A window over a join reads back.
+    "SELECT g, n, v, ROW_NUMBER() OVER (PARTITION BY g ORDER BY n) AS r FROM t JOIN u USING (g)",
+    "SELECT t.g, n, SUM(v) OVER (ORDER BY n) AS s FROM t JOIN u ON t.g = u.g",
+    # SELECT * sorts its result, as the q that sorts one reads back.
+    "SELECT g, o, COUNT(*) AS c FROM t GROUP BY g, o HAVING COUNT(*) >= 1 ORDER BY g, o",
+    # IN (SELECT ...) of two number types: in raised 'type.
+    "SELECT g, n FROM t WHERE n IN (SELECT v / 10 FROM u)",
+    "SELECT g, n FROM t WHERE n NOT IN (SELECT v / 10 FROM u) AND n > 0",
+    "SELECT g, x FROM t WHERE x IN (SELECT o FROM t)",
+    # ARRAY_AGG: under by a group's values are its list; select l:n by g
+    # read back as an ungrouped column.
+    "SELECT g, LIST(n) AS l FROM t GROUP BY g",
+    "SELECT g, ARRAY_AGG(n * 2) AS l, COUNT(*) AS c FROM t WHERE o > 1 GROUP BY g",
+    "SELECT ARRAY_AGG(o) AS l FROM t",
 ]
 
 

@@ -145,9 +145,13 @@ def star_select(parser, expressions, source) -> exp.Expr:
         else:
             node.set("from_", exp.From(this=exp.Subquery(this=inner)))
     else:
-        from sqlglot_q.parser import as_table
+        from sqlglot_q.parser import source_table
 
-        node.set("from_", exp.From(this=as_table(parser, source)))
+        # A table, or a join: its FROM and JOINs.
+        table, joins = source_table(parser, source)
+        node.set("from_", exp.From(this=table))
+        if joins:
+            node.set("joins", joins)
     node.meta["q_windows"] = True
     return node
 

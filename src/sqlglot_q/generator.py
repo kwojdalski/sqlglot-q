@@ -202,6 +202,12 @@ FULL_JOIN = (
     "(ej[k;a;b] uj y where not (k#y) in k#b) uj z where not (k#z) in k#a}"
 )
 HALF_EVEN = "{f:floor x+0.5;f-(x=f-0.5)&1=f mod 2}"
+# x IN (SELECT ...): q's in, but a long against floats (two number types)
+# compared as floats, where in raises 'type.
+IN_ANY = (
+    "{$[(t:abs type x)=u:abs type y;x in y;(t in 5 6 7 8 9h)&u in 5 6 7 8 9h;"
+    "(`float$x) in `float$y;x in y]}"
+)
 # (a, b) IN (SELECT ...): the rows as a table, in the subquery's rows that
 # have no null; a row with a null part matches nothing, as in SQL.
 TUPLE_IN = (
@@ -712,13 +718,18 @@ class QGenerator(Generator):
                 return f"{TUPLE_IN}[({values});({self.sql(select)})]"
             if len(select.expressions) != 1:
                 return self.refuse("IN (SELECT ...) needs exactly one column")
-            column = select.expressions[0]
-            inner = select.copy()
-            inner.set("expressions", [exp.alias_(column, "x")])
-            # Parenthesised: in a where list, exec ... from would take the
-            # constraints after it as part of its from.
-            return f"{subject} in (exec x from ({self.sql(inner)}))"
+            return f"{IN_ANY}[{self.sql(node.this)};{self.in_values(node)}]"
         return f"{subject} in {self.vector(node.expressions)}"
+
+    def in_values(self, node: exp.In) -> str:
+        """The subquery of x IN (SELECT c ...) as q's list of its values."""
+        query = node.args["query"]
+        select = query.this if isinstance(query, exp.Subquery) else query
+        inner = select.copy()
+        inner.set("expressions", [exp.alias_(select.expressions[0], "x")])
+        # Parenthesised: in a where list, exec ... from would take the
+        # constraints after it as part of its from.
+        return f"(exec x from ({self.sql(inner)}))"
 
     def between_sql(self, node: exp.Between) -> str:
         bounds = [node.args["low"], node.args["high"]]
@@ -862,6 +873,14 @@ class QGenerator(Generator):
         if not self.symbols and any(is_text(x) for x in (node.this, node.expression)):
             case.meta["text"] = True  # NULLIF(w, ''): the branches are text
         return self.case_sql(case)
+
+    def arrayagg_sql(self, node: exp.ArrayAgg) -> str:
+        if node.args.get("order") or isinstance(node.this, (exp.Distinct, exp.Order)):
+            return self.refuse("ARRAY_AGG with DISTINCT or ORDER BY has no q translation here")
+        # Under by, a group's values are a list already; over all rows, the
+        # one list enlisted, a row.
+        value = self.operand(node.this)
+        return value if getattr(self, "_by", False) else f"enlist {value}"
 
     def logical(self, node: exp.Expr) -> str:
         from sqlglot_q.truth import fails, holds

@@ -159,7 +159,9 @@ def fails(gen: QGenerator, node: exp.Expr) -> str:
             return gen.refuse("(a, b) NOT IN (SELECT ...) has no q translation here")
         # x NOT IN (SELECT ...) is never true once the subquery has a null.
         text = gen.sql(node)
-        subject, _, values = text.partition(" in ")
+        if text.startswith("'"):
+            return text  # refused
+        values = gen.in_values(node)
         return guarded(gen, [node.this], f"(not {text})&not any null {values}")
     if isinstance(node, exp.Between):
         sides = [node.this, node.args["low"], node.args["high"]]

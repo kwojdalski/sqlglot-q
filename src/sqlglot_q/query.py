@@ -492,7 +492,11 @@ def grouped(
     def column(name: str | None, expr: exp.Expr) -> str:
         return f"{gen.name(name)}:{gen.sql(expr)}" if name else gen.sql(expr)
 
-    cols = [column(n, e) for n, e in computed] + [column(n, e) for n, e in hidden]
+    gen._by = True  # ARRAY_AGG under by: the group's values as they are
+    try:
+        cols = [column(n, e) for n, e in computed] + [column(n, e) for n, e in hidden]
+    finally:
+        gen._by = False
     by = ", ".join(
         gen.sql(e)
         if n is None or (isinstance(e, exp.Column) and e.name == n)
@@ -563,6 +567,10 @@ def order_terms(
             terms.append((name, desc, nulls, True))
         elif isinstance(target, exp.Column) and target.name in names:
             terms.append((target.name, desc, nulls, True))
+        elif isinstance(target, exp.Column) and star_only(items):
+            # SELECT * keeps every column: the result is sorted, as the q
+            # that sorts a select's result reads back.
+            terms.append((target.name, desc, nulls, True))
         elif isinstance(target, exp.Column):
             terms.append((target.name, desc, nulls, False))
         else:
@@ -576,6 +584,10 @@ def order_terms(
         return [], [(gen.name(n), d, f) for n, d, f, _ in terms]
     gen.refuse("ORDER BY a column the grouped result does not include")
     return [], []
+
+
+def star_only(items: list[exp.Expr]) -> bool:
+    return len(items) == 1 and isinstance(items[0], exp.Star) and not items[0].args.get("except_")
 
 
 def null_fix(ordered: exp.Ordered) -> str | None:

@@ -35,6 +35,7 @@ from sqlglot_q.generator import (
     FRAMES,
     FULL_JOIN,
     HALF_EVEN,
+    IN_ANY,
     INT_DIV,
     INTERSECT_ALL,
     LAG_DEFAULT,
@@ -829,6 +830,13 @@ class Statement:
             return QCall(this=self.expr(stop), fn="sums")
         if text in (RUNNING_MAX, RUNNING_MIN):
             return QCall(this=self.expr(stop), fn="maxs" if text == RUNNING_MAX else "mins")
+        if text == IN_ANY and self.is_("["):
+            self.expect("[")
+            subject = self.expr(set())
+            self.expect(";")
+            values = self.expr(set())
+            self.expect("]")
+            return self.dyad("in", subject, values)
         if text == TUPLE_IN and self.is_("["):
             self.expect("[")
             parts = self.expr(set())
@@ -1258,6 +1266,18 @@ class Statement:
             where = self.conditions(stop)
         if where is not None:
             where = scalar_aggregates(self, where, source)
+        if keys:
+            cols = [per_group(c, keys) for c in cols]
+        elif word == "select":
+            # select l:enlist n from t: the generator's ARRAY_AGG over all rows.
+            cols = [
+                exp.alias_(exp.ArrayAgg(this=c.this.this), c.alias)
+                if isinstance(c, exp.Alias)
+                and isinstance(c.this, Enlisted)
+                and not isinstance(c.this.this, (exp.Literal, Chars))
+                else c
+                for c in cols
+            ]
         node = select(self, cols, keys, source, where, distinct)
         if limit is not None:
             node = with_modifier(node, limit=limit)
@@ -1692,6 +1712,22 @@ def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
 
 
+def per_group(item: exp.Expr, keys: list[exp.Expr]) -> exp.Expr:
+    """An item of select ... by with no aggregate is each group's values, a
+    list: SQL's ARRAY_AGG. (A key, or a constant, is one value.)"""
+    value = item.this if isinstance(item, exp.Alias) else item
+    names = {(k.this if isinstance(k, exp.Alias) else k).sql() for k in keys}
+    names |= {k.alias for k in keys if isinstance(k, exp.Alias)}
+    columns = [c for c in value.find_all(exp.Column) if c.name not in names]
+    if not columns or value.find(exp.AggFunc, exp.Window, exp.Select, exp.Subquery):
+        return item
+    if any(isinstance(n, HELPERS) for n in value.walk()):
+        return item  # a q helper the select reads itself
+    if not isinstance(item, exp.Alias):
+        return exp.alias_(exp.ArrayAgg(this=value), value.name or "x")
+    return exp.alias_(exp.ArrayAgg(this=value), item.alias)
+
+
 def is_literal(node: exp.Expr) -> bool:
     return isinstance(node, (exp.Literal, Chars)) or (
         isinstance(node, exp.Paren) and is_literal(node.this)
@@ -1721,8 +1757,9 @@ def ordered(parser: Statement, cols: exp.Expr, target: exp.Expr, desc: bool) -> 
     terms = [exp.Ordered(this=exp.column(n), desc=desc, nulls_first=not desc) for n in names]
     if isinstance(target, exp.Paren):
         target = target.this
-    if isinstance(target, (exp.Column, Sorted)):
-        # Sorting a table, not a query: kept until the select reads it.
+    if isinstance(target, (exp.Column, Sorted, Joined)):
+        # Sorting a table (or a join), not a query: kept until the select
+        # reads it.
         inner = target.this if isinstance(target, Sorted) else target
         before = target.args["order"].expressions if isinstance(target, Sorted) else []
         return Sorted(this=inner, order=exp.Order(expressions=[*terms, *before]))
