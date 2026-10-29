@@ -637,7 +637,11 @@ class Statement:
             ns = self.next()
             if ns.kind != "sym" or ns.value != ["."]:
                 self.fail("delete t from `. is the only delete of a name read")
-            return exp.Drop(tables=[table(self, name.text)], kind="TABLE")
+            target = table(self, name.text)
+            # sqlglot moved DROP's table from `this` to a `tables` list in 30.x.
+            if "tables" in exp.Drop.arg_types:
+                return exp.Drop(tables=[target], kind="TABLE")
+            return exp.Drop(this=target, kind="TABLE")
         self.next()
         target = self.table_symbol()
         where = None
