@@ -93,6 +93,14 @@ smallest value of its type, so `0N<3`, `0N<>3` and `0N=0N` are all true, and
 | `x NOT IN (SELECT ...)` | `... &not any null S` | never true once the subquery has a null |
 | `b LIKE '%'` | `(not null b)&b like "*"` | a null symbol is ` , which `*` matches; other patterns need no guard |
 
+`a IS NOT DISTINCT FROM b` and `a IS DISTINCT FROM b` need nothing: q's own
+`=` and `<>` are null-safe (`0N=0N` is true). Reading q back follows from
+that: hand-written `b<>`x` is true for a null `b`, so it reads as
+`b IS DISTINCT FROM 'x'`, and `a=b` between two columns as `a IS NOT
+DISTINCT FROM b`; under the generator's guard they are plain `<>` and `=`.
+(Hand-written `a<3` still reads as SQL's `a < 3`, which drops the null rows
+q's keeps.)
+
 A guard goes only on a side that can be null and would make q say yes. In a
 select list a comparison is still q's boolean, which cannot be null.
 

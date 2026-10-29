@@ -19,6 +19,13 @@ keys and one-row tables (`tests/integration/test_nulls.py`):
 - Reading q: plain `sum x` is now `COALESCE(SUM(x), 0)` (q's sum of nothing
   is 0); nested parentheses were not all removed when reading.
 - The test harness could not build a one-row table, or read q's `inf`.
+- A second sweep (`tests/integration/test_nulls_more.py`: windows, dates and
+  timestamps over nulls, unions, grouping) found no more mismatches, and two
+  refusals worth lifting: `IS [NOT] DISTINCT FROM`, which is q's own `=` and
+  `<>`, and `STRING_AGG` (`sv`, skipping nulls). Reading q, `<>` and `=`
+  between two columns are now the null-safe SQL operators they are.
+- The harness wrote typed nulls (`0Nd`) inside temporal vectors, which q
+  refuses.
 
 Aligned with sqlglot's dialect conventions:
 

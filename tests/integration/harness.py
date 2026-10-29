@@ -35,12 +35,12 @@ def q_items(values: list) -> str:
     present = [v for v in values if v is not None]
     if present and all(isinstance(v, dt.datetime) for v in present):
         return " ".join(
-            "0Np" if v is None else v.strftime("%Y.%m.%dD%H:%M:%S.%f000") for v in values
+            "0N" if v is None else v.strftime("%Y.%m.%dD%H:%M:%S.%f000") for v in values
         )
     if present and all(isinstance(v, dt.date) for v in present):
-        return " ".join("0Nd" if v is None else v.strftime("%Y.%m.%d") for v in values)
+        return " ".join("0N" if v is None else v.strftime("%Y.%m.%d") for v in values)
     if present and all(isinstance(v, dt.time) for v in present):
-        return " ".join("0Nt" if v is None else v.strftime("%H:%M:%S.%f")[:12] for v in values)
+        return " ".join("0N" if v is None else v.strftime("%H:%M:%S.%f")[:12] for v in values)
     if all(isinstance(v, bool) for v in present):
         return "".join("1" if v else "0" for v in values) + "b" if values else "`boolean$()"
     if all(isinstance(v, int) for v in present):

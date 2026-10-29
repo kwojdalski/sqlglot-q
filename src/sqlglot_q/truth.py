@@ -76,6 +76,8 @@ def holds(gen: QGenerator, node: exp.Expr) -> str:
     """q true exactly where the SQL condition is true."""
     if isinstance(node, exp.Paren):
         return holds(gen, node.this)
+    if isinstance(node, (exp.NullSafeEQ, exp.NullSafeNEQ)):
+        return gen.sql(node)  # q's = and <> are null-safe already
     if isinstance(node, tuple(NEGATED)):
         return guarded(gen, comparison_guards(node), gen.sql(node))
     if isinstance(node, exp.Not):
@@ -120,6 +122,10 @@ def fails(gen: QGenerator, node: exp.Expr) -> str:
     """q true exactly where the SQL condition is false (not unknown)."""
     if isinstance(node, exp.Paren):
         return fails(gen, node.this)
+    if isinstance(node, exp.NullSafeEQ):
+        return gen.sql(exp.NullSafeNEQ(this=node.this.copy(), expression=node.expression.copy()))
+    if isinstance(node, exp.NullSafeNEQ):
+        return gen.sql(exp.NullSafeEQ(this=node.this.copy(), expression=node.expression.copy()))
     if type(node) in NEGATED:
         flipped = NEGATED[type(node)](this=node.this.copy(), expression=node.expression.copy())
         return holds(gen, flipped)

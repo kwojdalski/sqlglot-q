@@ -467,6 +467,8 @@ class Statement:
             # q's sum over no values (or only nulls) is 0; SQL's SUM is NULL.
             total = self.aggregate_of("sum", arg)
             return exp.Coalesce(this=total, expressions=[exp.Literal.number(0)])
+        if word == "first" and isinstance(arg, exp.GroupConcat):
+            return arg
         if word == "first" and isinstance(arg, QCall) and arg.args["fn"] == "asc":
             inner = arg.this
             if isinstance(inner, NonNull):
@@ -566,6 +568,12 @@ class Statement:
             # A lambda applies to all of the expression on its right.
             target = self.expr(stop)
             return null_order(self, target, nulls[2], first=nulls[1] == "idesc")
+        agg = STRING_AGG_TEXT.match(text)
+        if agg:
+            self.expect("[")
+            arg = self.expr(set())
+            self.expect("]")
+            return exp.GroupConcat(this=arg, separator=exp.Literal.string(unescape(agg[1])))
         if text == NULLS:
             return NullsAsNull(this=self.expr(stop))
         if text == NON_NULL:
@@ -695,7 +703,13 @@ class Statement:
             self.fail("= on a string compares characters: SQL equality is ~\\:")
         if op in ("&", "and") and guard_of(left, right):
             # (not null a)&a<3: the generator's guard for SQL's a < 3, which
-            # is never true on a null already.
+            # is never true on a null already. Under a guard, q's null-safe
+            # = and <> are SQL's plain ones.
+            right = bare(right)
+            if isinstance(right, exp.NullSafeEQ):
+                return exp.EQ(this=right.this, expression=right.expression)
+            if isinstance(right, exp.NullSafeNEQ):
+                return exp.NEQ(this=right.this, expression=right.expression)
             return right
         if op in ("&", "and") and isinstance(bare(right), NoNulls):
             # (not x in S)&not any null S: SQL's x NOT IN (S)
@@ -710,6 +724,11 @@ class Statement:
             first = right.this if isinstance(right, exp.Greatest) else right
             # ignore_nulls: as DuckDB's GREATEST, which skips a null.
             return exp.Greatest(this=left, expressions=[first, *items], ignore_nulls=True)
+        if op == "<>" or (op == "=" and nullable_side(left) and nullable_side(right)):
+            # q's <> is true for a null against a value, and = for two nulls:
+            # SQL's IS [NOT] DISTINCT FROM, not its = and <>.
+            node = exp.NullSafeNEQ if op == "<>" else exp.NullSafeEQ
+            return node(this=left, expression=right)
         if op in GLYPHS:
             return GLYPHS[op](this=left, expression=right)
         if op in (",'", ",\\:", ",/:", ",") and (text_part(left) or text_part(right)):
@@ -1371,7 +1390,13 @@ def no_from(parser: Statement, table: TableLiteral) -> exp.Expr:
 
 NULL_ORDER = re.compile(r"\{x (iasc|idesc) null x`([A-Za-z][A-Za-z0-9_]*)\}\Z")
 
+STRING_AGG_TEXT = re.compile(
+    r'\{\$\[all null x;`;`\$\("((?:[^"\\]|\\.)*)"\) sv string x where not null x\]\}\Z'
+)
+
 BOOLEAN = (
+    exp.NullSafeEQ,
+    exp.NullSafeNEQ,
     exp.EQ,
     exp.NEQ,
     exp.GT,
@@ -1499,7 +1524,10 @@ def aggregate(kind, arg):
 
 def operands(node: exp.Expr) -> list[exp.Expr]:
     node = bare(node)
-    if isinstance(node, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE)):
+    if isinstance(
+        node,
+        (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.NullSafeEQ, exp.NullSafeNEQ),
+    ):
         return [bare(node.this), bare(node.expression)]
     if isinstance(node, exp.In):
         return [bare(node.this)]
@@ -1552,3 +1580,12 @@ def without_null_keys(node: exp.Expr, keys: list[str]) -> exp.Expr:
         return node
     source = node.args["from_"].this
     return source.this if isinstance(source, exp.Subquery) else exp.column(source.name)
+
+
+def nullable_side(node: exp.Expr) -> bool:
+    node = bare(node)
+    if isinstance(node, (exp.Literal, exp.Boolean, Chars)):
+        return False
+    if isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal):
+        return False
+    return not (isinstance(node, exp.Cast) and isinstance(node.this, exp.Literal))

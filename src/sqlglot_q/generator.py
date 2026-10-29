@@ -73,7 +73,10 @@ MONADIC = {
 ROUND = "{signum[x]*floor 0.5+abs x}"  # half away from zero, as SQL
 ROUND_TO = "{(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y}"
 INT_DIV = "{signum[x*y]*div[abs x;abs y]}"  # toward zero; q's div floors
-MOD = "{x-y*signum[x%y]*floor abs x%y}"  # SQL's %: the dividend's sign
+MOD = "{x-y*signum[x%y]*floor abs x%y}"
+STRING_AGG = (
+    "{{$[all null x;`;`$({sep}) sv string x where not null x]}}"  # SQL's %: the dividend's sign
+)
 LENGTH = "{?[null x;0N;count each string x]}"  # a null symbol has no length
 # Aggregates of no values (none, or all null) are NULL in SQL; q's sum is 0,
 # min and max are 0W and -0W. And q's min and max refuse symbols ('type),
@@ -352,6 +355,27 @@ class QGenerator(Generator):
 
     eq_sql = neq_sql = gt_sql = gte_sql = lt_sql = lte_sql = binary
     add_sql = sub_sql = mul_sql = div_sql = and_sql = or_sql = binary
+
+    def nullsafeeq_sql(self, node) -> str:
+        # q's = is already null-safe: 0N=0N is true, 0N=1 false.
+        return self.sql(exp.EQ(this=node.this.copy(), expression=node.expression.copy()))
+
+    def nullsafeneq_sql(self, node) -> str:
+        return self.sql(exp.NEQ(this=node.this.copy(), expression=node.expression.copy()))
+
+    def groupconcat_sql(self, node) -> str:
+        sep = node.args.get("separator")
+        if sep is None:
+            sep = exp.Literal.string(",")
+        if not (isinstance(sep, exp.Literal) and sep.is_string):
+            return self.refuse("STRING_AGG is translated with a literal separator")
+        if isinstance(node.this, (exp.Distinct, exp.Order)) or node.args.get("order"):
+            return self.refuse("STRING_AGG with DISTINCT or ORDER BY has no q translation here")
+        if not self.symbols:
+            return self.refuse('STRING_AGG is translated for symbols, not string_literals="string"')
+        # Skips nulls as SQL does; all null (or none) is the null symbol.
+        fn = STRING_AGG.format(sep=self.chars(sep.this).replace("enlist ", ""))
+        return f"first {fn}[{self.sql(node.this)}]"
 
     def mod_sql(self, node: exp.Mod) -> str:
         floor = floor_mod(node)
