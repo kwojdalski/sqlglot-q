@@ -70,3 +70,16 @@ delete from `C where y<max fr
 
 / timeseries_kdb
 select from t where success
+
+/ ~/q-corpus, readable once dates, times and xbar were
+select time,price from trade where date=d,sym=s,time>09:35
+select min price,avg price,max price from trade where date=2010.12.09,sym=`IBM
+select nm:count i by .5 xbar rating from t
+
+/ hand-written tick queries
+select from trades where time within 2024.01.15D09:30:00.000000000 2024.01.15D10:00:00.000000000
+select vwap:(sum px*qty)%sum qty by sym, 0D00:05:00.000000000 xbar time from trades
+select n:count i by 0D01:00 xbar time from trades where day=2024.01.15
+select sym, px, bid from aj[`sym`time;trades;quotes]
+select hi:max px, lo:min px by sym, `year$time from trades
+update px:(type px)$0f from `trades where time<2024.01.15D09:31:00.000000000

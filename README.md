@@ -66,6 +66,24 @@ licence, such as the free personal one). The translation does not.
   `LIKE`/`ILIKE`, `IS [NOT] NULL`, arithmetic, `CASE`, `CAST`, `COALESCE`,
   `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, and common scalar functions
 - `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`
+- dates, timestamps and times (`DATE '2024-01-15'` is `2024.01.15`), fixed
+  intervals as timespans, `EXTRACT`/`YEAR`/`MONTH`/...
+- time buckets: DuckDB's `TIME_BUCKET`, `DATE_TRUNC` to a day or less, and
+  `FLOOR(x / n) * n` are q's `xbar`
+- as-of joins: `ASOF LEFT JOIN ... USING (sym, time)` is q's `aj`
+
+```python
+sqlglot.transpile(
+    "SELECT sym, TIME_BUCKET(INTERVAL '5 minutes', time) AS bar, AVG(px - bid) AS spread "
+    "FROM trades ASOF LEFT JOIN quotes USING (sym, time) "
+    "WHERE time >= TIMESTAMP '2024-01-15 09:30:00' GROUP BY sym, bar",
+    read="duckdb",
+    write="q",
+)
+# ['0!select spread:avg px-bid by sym, bar:0D00:05:00.000000000 xbar time
+#   from aj[`sym`time;trades;`sym`time xasc quotes]
+#   where time>=2024.01.15D09:30:00.000000000']
+```
 
 Every construct is checked by running its q in q 5 and its SQL in DuckDB on
 the same tables. Where q and SQL disagree (rounding, null counting, `LIMIT`

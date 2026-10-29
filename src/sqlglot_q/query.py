@@ -78,6 +78,8 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
     kind = (join.args.get("kind") or "").upper()
     if kind == "CROSS":
         return f"{left} cross {right}"
+    if (join.args.get("method") or "").upper() == "ASOF":
+        return asof(gen, left, right, join)
     keys = join_keys(gen, join)
     if keys is None:
         return gen.refuse(
@@ -91,6 +93,33 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
     if side or kind not in ("", "INNER"):
         return gen.refuse(f"{side or kind} JOIN has no q translation here")
     return f"ej[{symbols};{left};{right}]"
+
+
+def asof(gen: QGenerator, left: str, right: str, join: exp.Join) -> str:
+    """ASOF LEFT JOIN ... USING (k, time), or ON k = k AND l.time >= r.time:
+    for each left row the last right row with its keys at or before its time,
+    which is q's aj. aj wants the right table sorted on the keys."""
+    if (join.args.get("side") or "").upper() != "LEFT":
+        return gen.refuse("only ASOF LEFT JOIN has a q form (aj); ASOF JOIN drops rows aj keeps")
+    using = join.args.get("using")
+    if using:
+        keys = [gen.name(u.name) for u in using]
+    else:
+        on = join.args.get("on")
+        conds = conjuncts(on) if on is not None else []
+        *eqs, last = conds or [None]
+        same = lambda c, kind: (  # noqa: E731
+            isinstance(c, kind)
+            and isinstance(c.this, exp.Column)
+            and isinstance(c.expression, exp.Column)
+            and c.this.name == c.expression.name
+            and c.this.table != c.expression.table
+        )
+        if not (same(last, exp.GTE) and all(same(c, exp.EQ) for c in eqs)):
+            return gen.refuse("ASOF JOIN is translated on k = k AND left.time >= right.time")
+        keys = [gen.name(c.this.name) for c in [*eqs, last]]
+    symbols = "".join(f"`{k}" for k in keys)
+    return f"aj[{symbols};{left};{symbols} xasc {right}]"
 
 
 def join_keys(gen: QGenerator, join: exp.Join) -> list[str] | None:
@@ -248,7 +277,7 @@ def grouped(
     # Name each by key: a column keeps its name, an expression takes the
     # alias it has in the select list, or a made-up one.
     key_names = []
-    for i, (key, expr) in enumerate(zip(keys, key_exprs, strict=True)):
+    for key, expr in zip(keys, key_exprs, strict=True):
         # The name the select list gives the key wins over its own: SELECT
         # pid AS id ... GROUP BY pid has a column id.
         alias = next(
@@ -261,15 +290,19 @@ def grouped(
         elif isinstance(expr, exp.Column):
             key_names.append(expr.name)
         else:
-            key_names.append(f"k{i}")
+            # Left unnamed, q names it (0D00:05 xbar time is time); a name
+            # is only made up below if a reprojection has to refer to it.
+            key_names.append(None)
 
     # Each select item is either a by key, which q puts in the result itself,
     # or a column computed per group.
     names: list[str | None] = []
     computed: list[tuple[str | None, exp.Expr]] = []
+    key_slots: dict[int, int] = {}  # position in names -> key index
     for item in items:
         expr = unalias(item)
         if expr in key_exprs:
+            key_slots[len(names)] = key_exprs.index(expr)
             names.append(key_names[key_exprs.index(expr)])
             continue
         name = item.alias if isinstance(item, exp.Alias) else None
@@ -285,21 +318,30 @@ def grouped(
         condition, hidden = having_condition(having.this, computed, names)
 
     keys_first = list(key_names) + [n for n, _ in computed]
-    reorder = bool(hidden) or names != keys_first
+    picked_keys = sorted(key_slots.values())
+    reorder = bool(hidden) or names != keys_first or picked_keys != list(range(len(key_exprs)))
     if reorder:
         # The outer select picks columns by name, so every column needs one.
-        for i, (name, expr) in enumerate(computed):
+        for i, name in enumerate(key_names):
             if name is None:
-                fresh = f"x{i}"
-                computed[i] = (fresh, expr)
-                names[names.index(None)] = fresh
+                key_names[i] = f"k{i}"
+        for pos, k in key_slots.items():
+            names[pos] = key_names[k]
+        fresh_items = iter(i for i, (n, _) in enumerate(computed) if n is None)
+        for pos, name in enumerate(names):
+            if name is None:
+                i = next(fresh_items)
+                computed[i] = (f"x{i}", computed[i][1])
+                names[pos] = f"x{i}"
 
     def column(name: str | None, expr: exp.Expr) -> str:
         return f"{gen.name(name)}:{gen.sql(expr)}" if name else gen.sql(expr)
 
     cols = [column(n, e) for n, e in computed] + [column(n, e) for n, e in hidden]
     by = ", ".join(
-        gen.sql(e) if isinstance(e, exp.Column) and e.name == n else f"{gen.name(n)}:{gen.sql(e)}"
+        gen.sql(e)
+        if n is None or (isinstance(e, exp.Column) and e.name == n)
+        else f"{gen.name(n)}:{gen.sql(e)}"
         for n, e in zip(key_names, key_exprs, strict=True)
     )
     inner = f"0!select {', '.join(cols)} by {by} from {src}{where}"

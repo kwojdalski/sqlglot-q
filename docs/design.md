@@ -28,6 +28,12 @@ Each of these was measured in q 5 and is pinned by `tests/integration`.
 | `AND` in WHERE | `&` | | a q where list, `where p, q`: same rows, and q filters progressively |
 | `COALESCE(a,b)` | | | `b^a` |
 | `x.y` qualifier | | q columns are unqualified | `y` |
+| `DATE '2024-01-15'` | | a typed string in SQL | `2024.01.15` (timestamps `...D09:30:00.000000000`, times `09:30:00.000`) |
+| `INTERVAL '5' MINUTE` | | | the timespan `0D00:05:00.000000000`; months and years have no fixed length and are refused |
+| `EXTRACT(MINUTE FROM t)` | | | `` `uu$t `` (`year`, `mm`, `dd`, `hh`, `uu`, `ss`) |
+| `TIME_BUCKET(INTERVAL '5 minutes', t)` | | q buckets from 2000.01.01, DuckDB from 2000-01-03 | `0D00:05:00.000000000 xbar t`, for widths that divide a day |
+| `FLOOR(x / n) * n` | | | `n xbar x` |
+| `ASOF LEFT JOIN q USING (sym, time)` | `aj[...;t;q]` | aj wants the right table sorted | `` aj[`sym`time;t;`sym`time xasc q] `` |
 | alias `"p.0"` | `p.0:...` | not a name q can write in a select | placeholder, then `` `p.0 xcol `` |
 
 ## Reading q
@@ -63,6 +69,9 @@ becomes `0!select ... by`); the second must not.
 - Joins must be on equality of same-named columns. `LEFT JOIN` is `lj`,
   which takes the first match on the right: SQL's answer when the right side
   is unique on the keys, not otherwise.
+- `aj` keeps the right table's value for a column both sides have; DuckDB's
+  `ASOF JOIN` keeps both columns. `ASOF JOIN` without `LEFT` drops the rows
+  with no match, which aj keeps, and is refused.
 - `UNION` matches columns by name in q and by position in SQL.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.

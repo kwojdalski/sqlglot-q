@@ -8,8 +8,10 @@ starts in.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
+import re
 import shutil
 import subprocess
 import tempfile
@@ -25,6 +27,14 @@ def q_binary() -> str | None:
 def q_column(values: list) -> str:
     """A Python column as a q list literal of one type."""
     present = [v for v in values if v is not None]
+    if present and all(isinstance(v, dt.datetime) for v in present):
+        return " ".join(
+            "0Np" if v is None else v.strftime("%Y.%m.%dD%H:%M:%S.%f000") for v in values
+        )
+    if present and all(isinstance(v, dt.date) for v in present):
+        return " ".join("0Nd" if v is None else v.strftime("%Y.%m.%d") for v in values)
+    if present and all(isinstance(v, dt.time) for v in present):
+        return " ".join("0Nt" if v is None else v.strftime("%H:%M:%S.%f")[:12] for v in values)
     if all(isinstance(v, bool) for v in present):
         return "".join("1" if v else "0" for v in values) + "b" if values else "`boolean$()"
     if all(isinstance(v, int) for v in present):
@@ -102,6 +112,12 @@ def run_duckdb(tables: dict[str, dict[str, list]], sql: str) -> Rows:
 
 def duck_type(values: list) -> str:
     present = [v for v in values if v is not None]
+    if present and all(isinstance(v, dt.datetime) for v in present):
+        return "TIMESTAMP"
+    if present and all(isinstance(v, dt.date) for v in present):
+        return "DATE"
+    if present and all(isinstance(v, dt.time) for v in present):
+        return "TIME"
     if all(isinstance(v, bool) for v in present):
         return "BOOLEAN"
     if all(isinstance(v, int) for v in present):
@@ -118,6 +134,13 @@ def normal(rows: Rows) -> Rows:
     def cell(v):
         if isinstance(v, bool):
             return v
+        if isinstance(v, (dt.date, dt.time)):
+            v = v.isoformat()
+        if isinstance(v, str) and TEMPORAL.match(v):
+            # q's JSON writes 2024-01-15T09:30:00.000000000 and 09:30:00.000;
+            # Python's isoformat drops the zero fraction.
+            v = re.sub(r"\.?0+$", "", v) if "." in v else v
+            return v.replace(" ", "T")
         if isinstance(v, (int, float)):
             # q's count is an int where DuckDB's is a bigint, and its avg of
             # longs a float: compare values, not types.
@@ -127,6 +150,11 @@ def normal(rows: Rows) -> Rows:
         return v
 
     return [tuple(cell(v) for v in row) for row in rows]
+
+
+TEMPORAL = re.compile(
+    r"(\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}:\d{2}(\.\d+)?)?|\d{2}:\d{2}:\d{2}(\.\d+)?)$"
+)
 
 
 def same(a: Rows, b: Rows, ordered: bool) -> bool:

@@ -23,6 +23,8 @@ from sqlglot.errors import ParseError
 
 from sqlglot_q.canonical import canonical
 from sqlglot_q.generator import HALF_EVEN, NAME, RESERVED, TYPES
+from sqlglot_q.temporal import CASTS as PART_CASTS
+from sqlglot_q.temporal import interval, span_nanoseconds
 
 SPREAD = "{(count x)#y}"
 CASTS = {name: kind for kind, (name, _) in TYPES.items()}
@@ -70,6 +72,7 @@ KEYWORD_DYADS = {
     "cross",
     "xcol",
     "insert",
+    "xbar",
 }
 MONADS = (
     {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
@@ -92,6 +95,9 @@ TOKEN = re.compile(
     r"""
     (?P<str>"(?:[^"\\]|\\.)*")
   | (?P<lambda>\{)
+  | (?P<temporal>(?:\d{4}\.\d{2}\.\d{2}(?:D\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?
+      |\d+D(?:\d{2}(?::\d{2}(?::\d{2}(?:\.\d+)?)?)?)?
+      |\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?![A-Za-z0-9_.]))
   | (?P<bool>[01]+b(?![A-Za-z0-9_]))
   | (?P<num>0[NnWw][a-z]?|\d+(?:\.\d*)?(?:e[+-]?\d+)?[a-z]?|\.\d+(?:e[+-]?\d+)?[a-z]?)
   | (?P<sym>(?:`[A-Za-z0-9_.:]*)+)
@@ -101,7 +107,7 @@ TOKEN = re.compile(
     """,
     re.VERBOSE,
 )
-NOUN_END = {"name", "sym", "num", "str", "bool", "lambda"}
+NOUN_END = {"name", "sym", "num", "str", "bool", "lambda", "temporal"}
 
 
 def tokenize(text: str) -> list[Token]:
@@ -137,7 +143,7 @@ def tokenize(text: str) -> list[Token]:
                 tokens.append(Token("num", "-" + n.group(), spaced=spaced))
                 i = n.end()
                 continue
-        if kind == "num" and prev is not None and prev.kind == "num" and spaced:
+        if kind in ("num", "temporal") and prev is not None and prev.kind == kind and spaced:
             # 1 2 3 is one vector literal.
             prev.value = [*(prev.value or [prev.text]), word]
             i = m.end()
@@ -310,6 +316,10 @@ class Statement:
             if tok.value:
                 return Rows(items=[number(v) for v in tok.value])
             return number(tok.text)
+        if tok.kind == "temporal":
+            if tok.value:
+                return Rows(items=[temporal(self, v) for v in tok.value])
+            return temporal(self, tok.text)
         if tok.kind == "bool":
             bits = tok.text[:-1]
             if len(bits) != 1:
@@ -339,6 +349,8 @@ class Statement:
             return self.query(word, stop)
         if word == "ej" and self.is_("["):
             return self.equijoin()
+        if word == "aj" and self.is_("["):
+            return self.asof_join()
         if word in MONADS and (self.starts_term() or self.peek_query()):
             return self.monad(word, self.expr(stop))
         if word in MONADS | KEYWORD_DYADS | QUERY_WORDS:
@@ -409,6 +421,8 @@ class Statement:
         arg = self.expr(stop)
         if type_name == "" and isinstance(arg, exp.Cast):
             return arg  # `$string x
+        if type_name in PART_CASTS:
+            return exp.Extract(this=exp.var(PART_CASTS[type_name]), expression=arg)
         kind = CASTS.get(type_name)
         if kind is None:
             self.fail(f"no SQL type for `{type_name}")
@@ -485,6 +499,22 @@ class Statement:
         self.expect("]")
         return Joined(this=left, expression=right, keys=keys.value, side="")
 
+    def asof_join(self) -> exp.Expr:
+        self.expect("[")
+        keys = self.next()
+        if keys.kind != "sym":
+            self.fail("aj takes a symbol list of keys")
+        self.expect(";")
+        left = self.expr(set())
+        self.expect(";")
+        right = self.expr(set())
+        self.expect("]")
+        if isinstance(right, Sorted):
+            # aj[k;t;k xasc q]: the sort is aj's precondition, not part of
+            # the query.
+            right = right.this
+        return Joined(this=left, expression=right, keys=keys.value, side="LEFT", method="ASOF")
+
     def dyad(self, op: str, left: exp.Expr, right: exp.Expr) -> exp.Expr:
         if op in ("=", "<>") and any(chars(n) for n in (left, right)):
             # = on a string compares it character by character; SQL's = on
@@ -496,6 +526,13 @@ class Statement:
             fn = left.this.this
             if isinstance(fn, exp.Column) and fn.name == "type":
                 return TypedAs(this=right)
+        if op == "xbar":
+            if isinstance(left, exp.Interval):
+                return exp.DateBin(this=left, expression=right)
+            # n xbar x is x rounded down to a multiple of n.
+            return exp.Mul(
+                this=exp.Floor(this=exp.Div(this=right, expression=left)), expression=left
+            )
         if op == "mod":
             return exp.Mod(this=left, expression=right)
         if op == "^":
@@ -687,7 +724,7 @@ class Keyed(exp.Expression):
 
 
 class Joined(exp.Expression):
-    arg_types = {"this": True, "expression": True, "keys": True, "side": False}
+    arg_types = {"this": True, "expression": True, "keys": True, "side": False, "method": False}
 
 
 class Chars(exp.Expression):
@@ -706,6 +743,34 @@ class Enlisted(exp.Expression):
 
 class TypedAs(exp.Expression):
     arg_types = {"this": True}
+
+
+def temporal(parser: Statement, text: str) -> exp.Expr:
+    """A q date, timestamp, time or timespan literal as SQL's typed literal."""
+    if "D" in text and "." in text.split("D")[0]:
+        day, clock = text.split("D")
+        ns = clock.split(".")[1] if "." in clock else ""
+        body = f"{day.replace('.', '-')} {clock.split('.')[0]}"
+        frac = ns.rstrip("0")
+        value = f"{body}.{frac}" if frac else body
+        if len(clock.split(".")[0]) == 5:
+            value = f"{body}:00"
+        return exp.Cast(this=exp.Literal.string(value), to=exp.DataType.build("TIMESTAMP"))
+    if "D" in text:
+        ns = span_nanoseconds(text)
+        if ns is None:
+            parser.fail(f"cannot read the timespan {text}")
+        return interval(ns)
+    if re.match(r"\d{4}\.", text):
+        return exp.Cast(
+            this=exp.Literal.string(text.replace(".", "-")), to=exp.DataType.build("DATE")
+        )
+    clock, _, frac = text.partition(".")
+    if len(clock) == 5:
+        clock += ":00"
+    frac = frac.rstrip("0")
+    value = f"{clock}.{frac}" if frac else clock
+    return exp.Cast(this=exp.Literal.string(value), to=exp.DataType.build("TIME"))
 
 
 def chars(node: exp.Expr) -> bool:
@@ -801,7 +866,9 @@ def source_table(parser: Statement, source: exp.Expr) -> tuple[exp.Expr, list[ex
             join = exp.Join(this=right, kind="CROSS")
         else:
             using = [exp.to_identifier(k) for k in keys]
-            join = exp.Join(this=right, using=using, side=side or None)
+            join = exp.Join(
+                this=right, using=using, side=side or None, method=source.args.get("method")
+            )
         return left, [*joins, join]
     if is_query(source):
         return exp.Subquery(this=source), []

@@ -20,9 +20,11 @@ class Validator(unittest.TestCase):
     def validate(self, sql: str, q: str, read: str | None = None, **opts) -> None:
         self.assertEqual(sqlglot.transpile(sql, read=read, write=self.dialect, **opts)[0], q)
 
+    read: str | None = None
+
     def refuses(self, sql: str, message: str) -> None:
         with pytest.raises(UnsupportedError, match=message):
-            sqlglot.transpile(sql, write=self.dialect)
+            sqlglot.transpile(sql, read=self.read, write=self.dialect)
 
 
 class TestRegistration(Validator):
@@ -183,6 +185,57 @@ class TestFunctions(Validator):
         self.validate(
             "SELECT EXP(-a), LN(a), ABS(a) FROM t", "select exp neg a, log a, abs a from t"
         )
+
+
+class TestTemporal(Validator):
+    read = "duckdb"
+
+    def validate(self, sql: str, q: str, **opts) -> None:
+        super().validate(sql, q, read="duckdb", **opts)
+
+    def test_literals(self):
+        self.validate(
+            "SELECT a FROM t WHERE d = DATE '2024-01-15'", "select a from t where d=2024.01.15"
+        )
+        self.validate(
+            "SELECT a FROM t WHERE ts > TIMESTAMP '2024-01-15 09:30:00.5'",
+            "select a from t where ts>2024.01.15D09:30:00.500000000",
+        )
+        self.validate(
+            "SELECT a FROM t WHERE tm < TIME '09:30:00'", "select a from t where tm<09:30:00.000"
+        )
+
+    def test_intervals_are_timespans(self):
+        self.validate(
+            "SELECT ts + INTERVAL 90 SECOND AS x FROM t",
+            "select x:ts+0D00:01:30.000000000 from t",
+        )
+        self.refuses("SELECT d + INTERVAL 1 MONTH FROM t", "fixed intervals")
+
+    def test_parts(self):
+        self.validate(
+            "SELECT EXTRACT(year FROM ts) AS y, MONTH(d) AS m, EXTRACT(minute FROM ts) AS u FROM t",
+            "select y:`year$ts, m:`mm$d, u:`uu$ts from t",
+        )
+
+    def test_buckets_are_xbar(self):
+        self.validate(
+            "SELECT TIME_BUCKET(INTERVAL '5 minutes', ts) AS b FROM t",
+            "select b:0D00:05:00.000000000 xbar ts from t",
+        )
+        self.validate(
+            "SELECT DATE_TRUNC('hour', ts) AS h FROM t",
+            "select h:0D01:00:00.000000000 xbar ts from t",
+        )
+        self.validate("SELECT FLOOR(a / 5) * 5 AS b FROM t", "select b:5 xbar a from t")
+        # q counts buckets from 2000.01.01, DuckDB from 2000-01-03.
+        self.refuses("SELECT TIME_BUCKET(INTERVAL '7 minutes', ts) FROM t", "divide a day")
+
+    def test_asof_join_is_aj(self):
+        q = "select from aj[`sym`time;t;`sym`time xasc q]"
+        self.validate("SELECT * FROM t ASOF LEFT JOIN q USING (sym, time)", q)
+        self.validate("SELECT * FROM t ASOF LEFT JOIN q ON t.sym = q.sym AND t.time >= q.time", q)
+        self.refuses("SELECT * FROM t ASOF JOIN q USING (sym, time)", "ASOF LEFT JOIN")
 
 
 class TestStatements(Validator):

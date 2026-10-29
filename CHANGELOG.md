@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+Added, both directions, each checked in q 5 against DuckDB:
+
+- Dates, timestamps and times: `DATE '2024-01-15'` is `2024.01.15`, fixed
+  `INTERVAL`s are timespans, and `EXTRACT`/`YEAR`/`MONTH`/`DAY` are q's
+  `` `year$ ``/`` `mm$ ``/`` `dd$ ``... casts.
+- Time buckets: `TIME_BUCKET`, `DATE_TRUNC` (a day or less) and
+  `FLOOR(x / n) * n` are `xbar`.
+- As-of joins: `ASOF LEFT JOIN ... USING (sym, time)` (or `ON k = k AND
+  l.time >= r.time`) is `aj`, with the right table sorted as aj needs.
+- A group key q can name itself (`by 0D00:05 xbar time`) is left for q to
+  name, rather than given a made-up `k0`.
+
 Added:
 
 - Reading qSQL: `sqlglot.parse_one(q, read="q")`. Covers what the writer

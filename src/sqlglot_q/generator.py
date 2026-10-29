@@ -80,6 +80,8 @@ TYPES = {
     exp.DataType.Type.DECIMAL: ("float", "`float$()"),
     exp.DataType.Type.DATE: ("date", "`date$()"),
     exp.DataType.Type.TIMESTAMP: ("timestamp", "`timestamp$()"),
+    exp.DataType.Type.TIMESTAMPNTZ: ("timestamp", "`timestamp$()"),
+    exp.DataType.Type.DATETIME: ("timestamp", "`timestamp$()"),
     exp.DataType.Type.TIME: ("time", "`time$()"),
 }
 INTEGERS = {"short", "int", "long"}
@@ -98,6 +100,10 @@ def atomic(node: exp.Expr) -> bool:
     """Whether a node prints as one q token, so it needs no parentheses as an operand."""
     if isinstance(node, exp.Neg):
         return False
+    if isinstance(node, exp.Interval):
+        return True  # a timespan literal
+    if isinstance(node, exp.Cast) and is_text(node.this) and node.to.this in TEMPORAL:
+        return True  # DATE '...' is a q date literal
     # A subquery prints parenthesised already (q_subquery).
     return isinstance(
         node, (exp.Column, exp.Literal, exp.Null, exp.Boolean, exp.Paren, exp.Subquery)
@@ -217,6 +223,10 @@ class QGenerator(Generator):
     def binary(self, node: exp.Expr) -> str:
         glyph = GLYPHS[type(node)]
         left, right = node.this, node.expression
+        width = xbar_width(node)
+        if width is not None:
+            # FLOOR(x / n) * n buckets x by n: q's n xbar x.
+            return f"{self.operand(width)} xbar {self.sql(node.this.this.this.this)}"
         if isinstance(node, COMPARISONS) and (
             isinstance(left, exp.Null) or isinstance(right, exp.Null)
         ):
@@ -329,6 +339,9 @@ class QGenerator(Generator):
 
     def q_cast(self, node: exp.Cast) -> str:
         kind = node.to.this
+        if is_text(node.this) and kind in TEMPORAL:
+            # DATE '2024-01-15' is a literal: q writes it 2024.01.15.
+            return self.temporal(node.this.this, kind)
         arg = self.operand(node.this)
         if kind in TEXT:
             return f"`$string {arg}" if self.symbols else f"string {arg}"
@@ -340,6 +353,63 @@ class QGenerator(Generator):
             # 3.5 is 4); q's `long$ rounds half away from zero (2.5 is 3).
             return f"`{name}${HALF_EVEN} {arg}"
         return f"`{name}${arg}"
+
+    def temporal(self, text: str, kind) -> str:
+        from sqlglot_q.temporal import date_literal, time_literal, timestamp_literal
+
+        spell = {
+            exp.DataType.Type.DATE: date_literal,
+            exp.DataType.Type.TIME: time_literal,
+        }.get(kind, timestamp_literal)
+        literal = spell(text)
+        return literal if literal else self.refuse(f"{text!r} is not a {kind.value} q can write")
+
+    def q_interval(self, node: exp.Interval) -> str:
+        from sqlglot_q.temporal import timespan
+
+        span = timespan(node)
+        if span is None:
+            return self.refuse(
+                f"{node.sql()}: only fixed intervals (days and smaller) have a q timespan"
+            )
+        return span
+
+    def q_extract(self, node: exp.Extract) -> str:
+        from sqlglot_q.temporal import PARTS
+
+        part = node.name.upper()
+        if part not in PARTS:
+            return self.refuse(f"EXTRACT({part}) has no q cast")
+        return f"`{PARTS[part]}${self.operand(node.expression)}"
+
+    def date_part(self, node: exp.Expr) -> str:
+        from sqlglot_q.temporal import PARTS
+
+        part = {exp.Year: "YEAR", exp.Month: "MONTH", exp.Day: "DAY"}[type(node)]
+        return f"`{PARTS[part]}${self.operand(node.this)}"
+
+    q_year = q_month = q_day = date_part
+
+    def q_datebin(self, node: exp.DateBin) -> str:
+        from sqlglot_q.temporal import DAY, nanoseconds
+
+        if node.args.get("zone") or len([a for a in node.args.values() if a is not None]) > 2:
+            return self.refuse("TIME_BUCKET with an origin or offset has no q xbar")
+        width = node.this
+        ns = nanoseconds(width) if isinstance(width, exp.Interval) else None
+        if ns is None or DAY % ns:
+            # q counts buckets from 2000.01.01, DuckDB from 2000-01-03: they
+            # agree only for widths that divide a day.
+            return self.refuse("TIME_BUCKET is translated for widths that divide a day")
+        return f"{self.sql(width)} xbar {self.sql(node.expression)}"
+
+    def q_timestamptrunc(self, node: exp.TimestampTrunc) -> str:
+        from sqlglot_q.temporal import UNITS, span_text
+
+        unit = node.text("unit").upper().rstrip("S")
+        if unit not in UNITS or UNITS[unit] > UNITS["DAY"]:
+            return self.refuse(f"DATE_TRUNC to {unit} has no q xbar")
+        return f"{span_text(UNITS[unit])} xbar {self.sql(node.this)}"
 
     def q_case(self, node: exp.Case) -> str:
         default = node.args.get("default")
@@ -483,6 +553,30 @@ class QGenerator(Generator):
         from sqlglot_q.query import conjuncts
 
         return " where " + ", ".join(self.sql(c) for c in conjuncts(node.this))
+
+
+TEMPORAL = {
+    exp.DataType.Type.DATE,
+    exp.DataType.Type.TIME,
+    exp.DataType.Type.TIMESTAMP,
+    exp.DataType.Type.TIMESTAMPNTZ,
+    exp.DataType.Type.DATETIME,
+}
+
+
+def xbar_width(node: exp.Expr) -> exp.Expr | None:
+    """n in FLOOR(x / n) * n, the SQL spelling of q's n xbar x."""
+    if not isinstance(node, exp.Mul):
+        return None
+    floor = node.this.this if isinstance(node.this, exp.Paren) else node.this
+    if not isinstance(floor, exp.Floor) or floor.args.get("decimals"):
+        return None
+    div = floor.this.this if isinstance(floor.this, exp.Paren) else floor.this
+    if isinstance(div, exp.Div) and div.expression == node.expression:
+        if isinstance(floor.this, exp.Paren):
+            floor.set("this", div)
+        return node.expression
+    return None
 
 
 def unalias(node: exp.Expr) -> exp.Expr:

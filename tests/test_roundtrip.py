@@ -27,6 +27,8 @@ from sqlglot.errors import ParseError
 
 from tests.integration.harness import q_binary, run_duckdb, run_q, same
 from tests.integration.test_queries import QUERIES, STATEMENTS, TABLES
+from tests.integration.test_temporal import QUERIES as TEMPORAL
+from tests.integration.test_temporal import TICKS
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -37,14 +39,14 @@ def statements(path: Path) -> list[str]:
     ]
 
 
+# SQL is DuckDB's throughout: it is the engine that checks it, and the one
+# with TIME_BUCKET and ASOF JOIN.
 def to_q(sql: str) -> str:
-    return sqlglot.transpile(sql, write="q")[0]
+    return sqlglot.transpile(sql, read="duckdb", write="q")[0]
 
 
 def to_sql(q: str) -> str:
-    # transpile writes the read dialect when write is not given; SQL is the
-    # default dialect's.
-    return sqlglot.parse_one(q, read="q").sql()
+    return sqlglot.parse_one(q, read="q").sql("duckdb")
 
 
 SQL = (
@@ -57,6 +59,7 @@ SQL = (
         'SELECT a AS "p.0", b AS c FROM t',
         "SELECT a FROM t WHERE b ILIKE 'X%'",
     ]
+    + [sql for sql, _ in TEMPORAL]
 )
 Q_EXAMPLES = statements(FIXTURES / "q_examples.q")
 Q_REFUSED = statements(FIXTURES / "q_refused.q")
@@ -73,12 +76,14 @@ def test_sql_to_q_and_back_settles(sql):
 
 
 SELECTS = [(sql, ordered) for sql, ordered in QUERIES if sql.startswith(("SELECT", "WITH"))]
+SELECTS += TEMPORAL
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
 def test_sql_read_back_from_q_means_the_same(sql, ordered):
     back = to_sql(to_q(sql))
-    assert same(run_duckdb(TABLES, back), run_duckdb(TABLES, sql), ordered), back
+    tables = TICKS if " trades" in sql else TABLES
+    assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back
 
 
 @pytest.mark.parametrize("q", Q_EXAMPLES, ids=Q_EXAMPLES)
@@ -114,7 +119,9 @@ RUNNABLE = [q for q in Q_EXAMPLES if " from trades" in q or " from quotes" in q]
 @pytest.mark.parametrize("q", RUNNABLE, ids=RUNNABLE)
 def test_q_back_from_sql_returns_what_the_original_did(q):
     back = to_q(to_sql(q))
-    before, after = run_q(SHOWCASE, [q, back])
+    # Tick queries run on the tick tables; the showcase's on its own.
+    tables = TICKS if "time" in q or "day" in q or "aj[" in q else SHOWCASE
+    before, after = run_q(tables, [q, back])
     if isinstance(before, str):
         pytest.skip(f"q refuses the original too: {before}")
     assert not isinstance(after, str), f"q refused {back}: {after}"
@@ -124,8 +131,8 @@ def test_q_back_from_sql_returns_what_the_original_did(q):
 SCRIPT = """
 import json, sqlglot
 sql, q = json.loads(input())
-out = {s: sqlglot.transpile(s, write="q")[0] for s in sql}
-out.update({x: sqlglot.parse_one(x, read="q").sql() for x in q})
+out = {s: sqlglot.transpile(s, read="duckdb", write="q")[0] for s in sql}
+out.update({x: sqlglot.parse_one(x, read="q").sql("duckdb") for x in q})
 print(json.dumps(out, sort_keys=True))
 """
 
