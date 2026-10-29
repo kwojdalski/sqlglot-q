@@ -62,6 +62,10 @@ QUERIES = [
     # (a, b) IN (SELECT ...): rows matched whole, a null part matching nothing.
     "SELECT g, n FROM t WHERE (g, n) IN (SELECT g, n FROM t WHERE o > 1) AND n > 0",
     "SELECT a, w FROM t2 WHERE (a, w) IN (SELECT a, w FROM t2 WHERE w < 3)",
+    # A set operation's constant side takes the first's names.
+    "SELECT g FROM t INTERSECT SELECT 'a'",
+    "SELECT g FROM t UNION SELECT 'zz'",
+    "SELECT g, n FROM t WHERE g = 'a' UNION ALL SELECT 'q', 99",
 ]
 
 

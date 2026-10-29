@@ -24,6 +24,7 @@ from sqlglot.errors import ParseError
 from sqlglot_q import scalars
 from sqlglot_q.canonical import canonical
 from sqlglot_q.generator import (
+    ANY_FILL,
     BOOL_AND,
     BOOL_OR,
     CUME_DIST,
@@ -63,6 +64,7 @@ from sqlglot_q.generator import (
     SUBSTRING,
     SUBSTRING_FROM,
     TEXT_AGG,
+    TEXT_CMP,
     TEXT_FILL,
     TEXT_KEY,
     TEXT_LENGTH,
@@ -71,6 +73,7 @@ from sqlglot_q.generator import (
     TEXT_NULL,
     TEXT_OF,
     TEXT_PICK,
+    TEXT_SPREAD,
     TRUNC,
     TUPLE_IN,
     TYPES,
@@ -623,7 +626,12 @@ class Statement:
         if word == "enlist":
             # enlist "a" is the one-character string; ([] x:enlist v) is a
             # one-row table.
-            return arg if isinstance(arg, Chars) else Enlisted(this=arg)
+            if isinstance(arg, Chars) and len(arg.this) == 1 and not arg.meta.get("one"):
+                # enlist "a": the writer's one-character string.
+                arg.meta["one"] = True
+                return arg
+            # enlist "abc", enlist enlist "a": a list of one string.
+            return Enlisted(this=arg)
         if word == "distinct":
             if isinstance(arg, (exp.Intersect, exp.Except)) and not arg.args.get("distinct"):
                 arg.set("distinct", True)  # distinct a inter b: INTERSECT
@@ -703,6 +711,22 @@ class Statement:
             if node is None:
                 self.fail("a lambda with the wrong arguments")
             return node
+        if text == TEXT_SPREAD and self.is_("["):
+            self.expect("[")
+            self.expr(set())  # i: the partition's rows
+            self.expect(";")
+            value = self.expr(set())
+            self.expect("]")
+            return value
+        if text == TEXT_CMP:
+            return self.expr(stop)  # strings compared as symbols: the values
+        if text == ANY_FILL and self.is_("["):
+            self.expect("[")
+            first = self.expr(set())
+            self.expect(";")
+            second = self.expr(set())
+            self.expect("]")
+            return exp.Coalesce(this=literal(first), expressions=[literal(second)])
         if text == TEXT_NULL:
             return exp.Is(this=self.expr(stop), expression=exp.Null())  # empty: NULL
         if text == TEXT_LENGTH:
@@ -1149,6 +1173,15 @@ class Statement:
             return Joined(this=left, expression=right, keys=[], side="CROSS")
         if op == "xcol":
             return renamed(self, left, right)
+        if op in (",", "inter", "except"):
+            # ([] g:enlist `a): a SELECT of constants, as a set operation's side.
+            def constants(side):
+                inner = side
+                while isinstance(inner, exp.Paren):
+                    inner = inner.this
+                return no_from(self, inner) if isinstance(inner, TableLiteral) else side
+
+            left, right = constants(left), constants(right)
         if op == "," and is_query(left) and is_query(right):
             return exp.Union(this=left, expression=right, distinct=False)
         if op in ("inter", "except") and is_query(left) and is_query(right):
@@ -2025,23 +2058,34 @@ def dpipe_of(cond, then, other):
     other = bare(other) if other is not None else None
     if not (is_empty_text(then) and isinstance(other, exp.Concat)):
         return None
-    guards, stack = [], [bare(cond)]
+    guards, stack, casts = [], [bare(cond)], {}
     while stack:
         part = bare(stack.pop())
         if isinstance(part, (exp.Or, exp.Greatest)):
             stack += [part.this, *([part.expression] if part.expression else part.expressions)]
         elif isinstance(part, exp.Is):
-            guards.append(bare(part.this))
+            guard = bare(part.this)
+            if isinstance(guard, exp.Cast) and guard.to.this in (
+                exp.DataType.Type.TEXT,
+                exp.DataType.Type.VARCHAR,
+            ):
+                casts[repr(guard.this)] = guard  # read bare inside the join
+                guard = guard.this
+            guards.append(guard)
         else:
             return None
     columns = []
     for p in other.expressions:
-        if not isinstance(p, exp.Literal) and p not in columns:
+        # A literal or a constant (UPPER('x')) is not guarded: never NULL.
+        constant = not p.find(exp.Column, exp.AggFunc, exp.Select)
+        if not isinstance(p, exp.Literal) and not constant and p not in columns:
             columns.append(p)
     if sorted(map(repr, guards)) != sorted(map(repr, columns)):
         return None
-    node = other.expressions[0]
-    for p in other.expressions[1:]:
+    # || does not cast its parts as CONCAT does: the guard's CAST stays.
+    parts = [casts.get(repr(p), p) for p in other.expressions]
+    node = parts[0]
+    for p in parts[1:]:
         node = exp.DPipe(this=node, expression=p, safe=True)
     return node
 

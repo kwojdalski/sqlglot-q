@@ -125,6 +125,10 @@ def stage(gen: QGenerator, plan, value: str, tie_fix: bool, name: str, source: s
     from sqlglot_q.query import sort, wrap
 
     parts, terms = plan[0], plan[1]
+    if not gen.symbols and (plan[4] == "whole" or value.startswith(("first ", "last "))):
+        from sqlglot_q.generator import TEXT_SPREAD
+
+        value = f"{TEXT_SPREAD}[i;{value}]"  # one string per partition
     src = sort(list(terms), wrap(source), gen) if terms else source
     by = f" by {','.join(parts)}" if parts else ""
     text = f"update {name}:{value}{by} from {wrap(src)}"

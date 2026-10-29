@@ -58,6 +58,21 @@ QUERIES = [
     # q reads right to left: a three-part join is parenthesised on the left.
     "SELECT a, CONCAT(w, '-', v) AS c, w || '-' || v AS d FROM s",
     "SELECT a, CHR(CAST(a + 64 AS INTEGER)) AS c FROM s WHERE REGEXP_MATCHES(w, 'b')",
+    # Text of two columns, of unknown type when written: compared as symbols.
+    "SELECT a FROM s WHERE w < v",
+    "SELECT a FROM s WHERE w BETWEEN 'a' AND 'b'",
+    "SELECT a, COALESCE(w, v) AS c FROM s",
+    "SELECT a, w FROM s WHERE w = (SELECT MIN(w) FROM s)",
+    # enlist "abc" is a list of one string.
+    "SELECT a FROM s WHERE w NOT IN ('abc')",
+    "SELECT w FROM s INTERSECT SELECT 'abc'",
+    "SELECT REPLACE('abc', 'b', 'x') AS z",
+    "SELECT a, UPPER('x') || w AS c FROM s",
+    "SELECT a, CAST(a AS VARCHAR) || w AS c FROM s",
+    # A window's one string per partition, over its rows.
+    "SELECT a, w, FIRST_VALUE(w) OVER (ORDER BY a) AS p FROM s",
+    "SELECT a, MAX(w) OVER () AS p FROM s",
+    "SELECT a, MIN(w) OVER (ORDER BY a ROWS 1 PRECEDING) AS p FROM s",
 ]
 
 

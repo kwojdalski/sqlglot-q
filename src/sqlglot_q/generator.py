@@ -98,6 +98,14 @@ TEXT_MAX = f"last {{x iasc {TEXT_KEY} x}}"
 TEXT_PICK = "{$[x;y;z]}'"  # CASE over text: ?[...] cannot pick strings
 TEXT_LENGTH = "{?[0=count each x;0N;count each x]}"
 TEXT_FILL = "{$[0=count x;y;x]}'"  # COALESCE over text
+# String mode, where a column's type is not known: strings (and a string)
+# as symbols, which compare in text order; anything else as it is. And
+# COALESCE of two columns: the text fill for strings, ^ for the rest.
+TEXT_CMP = "{$[(type x) in 0 10h;`$x;x]}"
+ANY_FILL = "{$[0h=type x;{$[0=count x;y;x]}'[x;y];y^x]}"
+# A window's one value per partition, over its rows: update spreads an atom,
+# but one string is a list of characters.
+TEXT_SPREAD = "{$[10h=type y;(count x)#enlist y;y]}"
 PARSE = {"boolean": "B", "short": "H", "int": "I", "long": "J", "real": "E", "float": "F"}
 TEXT_AGG = '{{$[all {null} x;"";({sep}) sv x where not {null} x]}}'.replace(
     "{null}", TEXT_NULL.replace("{", "{{").replace("}", "}}")
@@ -126,13 +134,13 @@ RUNNING_SUM = "{?[0=sums not null x;x 0N;sums x]}"
 # symbols too, where maxs and mmax raise 'type. A null ranks lowest, and for
 # MIN is set past every rank: an index past the end is a null again.
 RUNNING_MAX = "{x (iasc x) maxs iasc iasc x}"
-RUNNING_MIN = "{x (iasc x) mins @[iasc iasc x;where null x;:;0W]}"
+RUNNING_MIN = f"{{x (iasc x) mins @[iasc iasc x;where {TEXT_NULL} x;:;0W]}}"
 # Sliding frames with nulls: msum counts a null as 0 and mmin takes it as the
 # least; SQL skips nulls, and a frame of only nulls is NULL. (mavg skips them.)
 MOVING_NULLS = {
     "msum": "{?[0=x msum not null y;y 0N;x msum y]}",
     "mmax": "{y (iasc y) x mmax iasc iasc y}",
-    "mmin": "{y (iasc y) x mmin @[iasc iasc y;where null y;:;0W]}",
+    "mmin": f"{{y (iasc y) x mmin @[iasc iasc y;where {TEXT_NULL} y;:;0W]}}",
 }
 # SIGN(NULL) is NULL; q's signum of a null is -1, a null being below zero.
 SIGN = "{?[null x;0Ni;signum x]}"
@@ -216,8 +224,8 @@ FRAMES = {
     for name, agg in (
         ("sum", "{$[count w:x where not null x;sum w;x 0N]}"),
         ("avg", "avg"),
-        ("max", "{$[count w:x where not null x;last asc w;x 0N]}"),
-        ("min", "{$[count w:x where not null x;first asc w;x 0N]}"),
+        ("max", f"{{$[count w:x where not {TEXT_NULL} x;last asc w;x 0N]}}"),
+        ("min", f"{{$[count w:x where not {TEXT_NULL} x;first asc w;x 0N]}}"),
         ("count", "{sum not null x}"),
         ("count_star", "count"),
     )
@@ -532,6 +540,12 @@ class QGenerator(Generator):
                     left, right = right, left
                 match = f"{self.operand(left)}~\\:{self.sql(right)}"
                 return match if isinstance(node, exp.EQ) else f"not {match}"
+            if isinstance(left, exp.Subquery):
+                left, right = right, left
+            if isinstance(right, exp.Subquery):
+                # One value, a string or not: matched against each row.
+                match = f"{self.operand(left)}~\\:{self.operand(right)}"
+                return match if isinstance(node, exp.EQ) else f"not {match}"
             # Two columns, of text or not: match row by row.
             match = f"{self.operand(left)}~'{self.operand(right)}"
             return match if isinstance(node, exp.EQ) else f"not {match}"
@@ -540,6 +554,11 @@ class QGenerator(Generator):
             # they compare in the text's order.
             sides = [f"(`${self.operand(x)})" for x in (left, right)]
             return f"{sides[0]}{glyph}{sides[1]}"
+        if not self.symbols and isinstance(node, (exp.GT, exp.GTE, exp.LT, exp.LTE)):
+            if not (atomic_value(left) or atomic_value(right)):
+                # Two values of unknown type: as symbols if they are strings.
+                sides = [f"({TEXT_CMP} {self.operand(x)})" for x in (left, right)]
+                return f"{sides[0]}{glyph}{sides[1]}"
         return f"{self.operand(left)}{glyph}{self.operand(right)}"
 
     eq_sql = neq_sql = gt_sql = gte_sql = lt_sql = lte_sql = binary
@@ -681,6 +700,10 @@ class QGenerator(Generator):
 
     def between_sql(self, node: exp.Between) -> str:
         bounds = [node.args["low"], node.args["high"]]
+        if not self.symbols:
+            # within of strings compares character by character.
+            low, high = (f"{TEXT_CMP} {self.operand(b)}" for b in bounds)
+            return f"({TEXT_CMP} {self.operand(node.this)}) within ({low};{high})"
         return f"{self.operand(node.this)} within {self.vector(bounds)}"
 
     def like_sql(self, node: exp.Like) -> str:
@@ -936,6 +959,13 @@ class QGenerator(Generator):
         if q_like is not None:
             # COALESCE(n > 3, FALSE) is what q's n>3 is, nulls and all.
             return self.sql(q_like)
+        if (
+            not self.symbols
+            and len(items) == 2
+            and not any(atomic_value(i) or is_text(i) or isinstance(i, exp.Null) for i in items)
+        ):
+            # Two columns, strings or not: chosen when the query runs.
+            return f"{ANY_FILL}[{self.sql(items[0])};{self.sql(items[1])}]"
         if not self.symbols and any(is_text(i) for i in items):
             # ^ cannot fill strings: the first non-empty, row by row.
             text = self.text_rows(items[-1])
@@ -1462,6 +1492,19 @@ def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
 
 
+def atomic_value(node: exp.Expr) -> bool:
+    """A literal number, date or boolean: not text, whatever the columns hold."""
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if isinstance(node, exp.Neg):
+        node = node.this
+    if isinstance(node, exp.Literal):
+        return not node.is_string
+    if isinstance(node, exp.Cast) and is_text(node.this):
+        return node.to.this in TEMPORAL  # DATE '...'
+    return isinstance(node, (exp.Boolean, exp.Interval, exp.CurrentDate, exp.CurrentTimestamp))
+
+
 def is_text(node: exp.Expr) -> bool:
     return isinstance(node, exp.Literal) and node.is_string
 
@@ -1605,7 +1648,8 @@ def aligned(node: exp.Expr) -> exp.Expr:
     if not (isinstance(first, exp.Select) and isinstance(inner, exp.Select)):
         return second
     names, theirs = output_names(first.expressions), output_names(inner.expressions)
-    if None in names or None in theirs or names == theirs or len(names) != len(theirs):
+    # An unnamed item of the second (SELECT 'zz') takes the first's name too.
+    if None in names or names == theirs or len(names) != len(theirs):
         return second
     inner = inner.copy()
     inner.set(
