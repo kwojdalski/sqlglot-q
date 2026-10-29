@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Fixed, each found by running q against DuckDB:
+
+- `ORDER BY` ignored where SQL puts nulls: DuckDB sorts them last, q first,
+  so a sort on a column with nulls came back in the wrong order. `NULLS
+  FIRST/LAST` and DuckDB's default are now honoured, in windows too.
+- The reader read every q `|` and `&` as OR and AND, but on values they are
+  max and min: `select a|b` came back as `a OR b`. Only between conditions
+  are they OR and AND now; `x&y` on values (min, which keeps nulls) is
+  refused, and so is `size=1 and side=0`, which q reads as
+  `size=(1 and side=0)`.
+
+Added, both directions:
+
+- `CASE` without `ELSE` and `NULLIF`, with a null of the branch's type.
+- `GREATEST`, `LEAST`, `ROUND`, `POWER`, `SIGN`, integer `//` (truncating,
+  as SQL, where q's `div` floors).
+- Aggregates with `FILTER (WHERE ...)`.
+- `TRIM`/`LTRIM`/`RTRIM`, `CONCAT` and `||` (which is NULL when a side is).
+- Joins on differently named keys, `RIGHT JOIN`, `FROM t, u`, and
+  `SELECT * EXCLUDE (...)`.
+
 Added, both directions:
 
 - Window functions: aggregates over a partition, running (`ROWS` and the

@@ -77,16 +77,29 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
     )
     side = (join.args.get("side") or "").upper()
     kind = (join.args.get("kind") or "").upper()
-    if kind == "CROSS":
+    plain = not any(join.args.get(k) for k in ("on", "using", "method"))
+    if kind == "CROSS" or (plain and not side and kind in ("", "INNER")):
+        # FROM t, u is a cross join too.
         return f"{left} cross {right}"
     if (join.args.get("method") or "").upper() == "ASOF":
         return asof(gen, left, right, join)
-    keys = join_keys(gen, join)
-    if keys is None:
+    pairs = join_keys(gen, join, right_node.alias_or_name)
+    if pairs is None:
         return gen.refuse(
-            "a join is only translated on equality of same-named columns (ON a.k=b.k or USING)"
+            "a join is only translated on equality of columns (ON a.k = b.j, or USING), "
+            "with the two sides told apart by their table"
         )
-    symbols = "".join(f"`{k}" for k in keys)
+    if side == "RIGHT":
+        # A RIGHT JOIN is the LEFT JOIN of the other way round.
+        left, right = right, left
+        pairs = [(r, lft) for lft, r in pairs]
+        side = "LEFT"
+    symbols = "".join(f"`{k}" for k, _ in pairs)
+    renames = [(k, j) for k, j in pairs if k != j]
+    if renames:
+        # ON t.a = u.b: u gets a copy of b named a to join on, and keeps b.
+        sets = ", ".join(f"{k}:{j}" for k, j in renames)
+        right = f"(update {sets} from {wrap(right)})"
     if side == "LEFT":
         # lj takes the first match on the right, which is SQL's LEFT JOIN when
         # the right side is unique on the keys.
@@ -123,24 +136,29 @@ def asof(gen: QGenerator, left: str, right: str, join: exp.Join) -> str:
     return f"aj[{symbols};{left};{symbols} xasc {right}]"
 
 
-def join_keys(gen: QGenerator, join: exp.Join) -> list[str] | None:
+def join_keys(gen: QGenerator, join: exp.Join, right: str) -> list[tuple[str, str]] | None:
+    """(left column, right column) for each key of an equi-join."""
     using = join.args.get("using")
     if using:
-        return [gen.name(u.name) for u in using]
+        return [(gen.name(u.name), gen.name(u.name)) for u in using]
     on = join.args.get("on")
     if on is None:
         return None
-    keys = []
+    pairs = []
     for c in conjuncts(on):
         if not (
             isinstance(c, exp.EQ)
             and isinstance(c.this, exp.Column)
             and isinstance(c.expression, exp.Column)
-            and c.this.name == c.expression.name
         ):
             return None
-        keys.append(gen.name(c.this.name))
-    return keys
+        a, b = c.this, c.expression
+        if a.table == right and b.table != right:
+            a, b = b, a
+        elif not (b.table == right or a.name == b.name):
+            return None  # unqualified, differently named: which is whose?
+        pairs.append((gen.name(a.name), gen.name(b.name)))
+    return pairs
 
 
 def resolve(node: exp.Expr, items: list[exp.Expr]) -> exp.Expr:
@@ -224,6 +242,15 @@ def query(gen: QGenerator, node: exp.Select) -> str:
         if sort_source:
             src = f"({sort(sort_source, src)})"
         distinct = " distinct" if node.args.get("distinct") else ""
+        excluded = items[0].args.get("except_") if star else None
+        if excluded:
+            # SELECT * EXCLUDE (a): every column but a.
+            dropped = ",".join(gen.name(c.name) for c in excluded)
+            inner = f"select{distinct} from {src}{where}"
+            text = f"delete {dropped} from {wrap(inner)}"
+            if sort_result:
+                text = sort(sort_result, text)
+            return limited(gen, node, text)
         if has_window(items):
             return windowed(gen, node, items, src, where, sort_result, sort_source, distinct)
         columns = "" if star else " " + ", ".join(projection(gen, items))
@@ -419,41 +446,63 @@ def order_terms(
     terms = []
     for ordered in order.expressions:
         target = resolve(ordered.this, items)
+        desc, nulls = bool(ordered.args.get("desc")), null_fix(ordered)
         if target in items:
             name = names[items.index(target)]
             if name is None:
                 gen.refuse("ORDER BY an unnamed expression: give it an alias")
                 return [], []
-            terms.append((name, bool(ordered.args.get("desc")), True))
+            terms.append((name, desc, nulls, True))
         elif isinstance(target, exp.Column) and target.name in names:
-            terms.append((target.name, bool(ordered.args.get("desc")), True))
+            terms.append((target.name, desc, nulls, True))
         elif isinstance(target, exp.Column):
-            terms.append((target.name, bool(ordered.args.get("desc")), False))
+            terms.append((target.name, desc, nulls, False))
         else:
             gen.refuse("ORDER BY is only translated for columns, aliases and positions")
             return [], []
-    if all(in_output for _, _, in_output in terms):
-        return [(gen.name(n), d) for n, d, _ in terms], []
+    if all(t[3] for t in terms):
+        return [(gen.name(n), d, f) for n, d, f, _ in terms], []
     if allow_source:
         # A select keeps its source's order, so sorting the table first sorts
         # the result by columns the result does not include.
-        return [], [(gen.name(n), d) for n, d, _ in terms]
+        return [], [(gen.name(n), d, f) for n, d, f, _ in terms]
     gen.refuse("ORDER BY a column the grouped result does not include")
     return [], []
 
 
-def sort(terms: list[tuple[str, bool]], text: str) -> str:
+def null_fix(ordered: exp.Ordered) -> str | None:
+    """Where the SQL wants nulls that q's sort does not put there: q sorts a
+    null first ascending and last descending. 'last' or 'first' when the two
+    disagree (DuckDB's ORDER BY x is NULLS LAST), None when they agree or
+    the SQL does not say."""
+    first = ordered.args.get("nulls_first")
+    if first is None:
+        return None
+    desc = bool(ordered.args.get("desc"))
+    if not desc and not first:
+        return "last"
+    if desc and first:
+        return "first"
+    return None
+
+
+def sort(terms: list[tuple], text: str) -> str:
     # xasc and xdesc are stable, so the least significant key sorts first and
-    # each more significant one re-sorts what it left.
-    runs: list[tuple[list[str], bool]] = []
-    for name, desc in terms:
-        if runs and runs[-1][1] == desc:
+    # each more significant one re-sorts what it left. A key whose nulls go
+    # elsewhere is then re-sorted, stably, on whether it is null.
+    runs: list[tuple[list[str], bool, str | None]] = []
+    for name, desc, *rest in terms:
+        fix = rest[0] if rest else None
+        if runs and runs[-1][1] == desc and runs[-1][2] is None and fix is None:
             runs[-1][0].append(name)
         else:
-            runs.append(([name], desc))
-    for cols, desc in reversed(runs):
+            runs.append(([name], desc, fix))
+    for cols, desc, fix in reversed(runs):
         verb = "xdesc" if desc else "xasc"
         text = f"{''.join('`' + c for c in cols)} {verb} {wrap(text)}"
+        if fix:
+            grade = "iasc" if fix == "last" else "idesc"
+            text = f"{{x {grade} null x`{cols[0]}}} ({text})"
     return text
 
 

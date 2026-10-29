@@ -8,7 +8,6 @@ select size from quotes
 select px from quotes
 select from quotes where size>100
 select from trades where sym=sym
-select from trades where size=1 and side=0
 select from quotes where px=1
 select max px by px from trades
 select top:max px by px from trades
@@ -90,3 +89,10 @@ update n:1+til count i by sym from `time xasc trades
 update chg:px-1 xprev px by sym from `time xasc trades
 update m:3 mavg px by sym from `time xasc trades
 update total:sum qty by sym from trades
+
+/ hand-written: max and min, filters in aggregates, null placement, renames
+select hi:px|bid from aj[`sym`time;trades;quotes]
+select n:count i where qty>50, v:sum qty where px>1.5 by sym from trades
+select from {x iasc null x`px} `px xasc trades
+select ex:`$((string sym),\:"-x") from trades
+delete day from select from trades where qty>10

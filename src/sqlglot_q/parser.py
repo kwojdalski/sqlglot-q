@@ -22,7 +22,7 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from sqlglot_q.canonical import canonical
-from sqlglot_q.generator import HALF_EVEN, NAME, RESERVED, TYPES
+from sqlglot_q.generator import HALF_EVEN, INT_DIV, NAME, RESERVED, ROUND, ROUND_TO, TYPES
 from sqlglot_q.temporal import CASTS as PART_CASTS
 from sqlglot_q.temporal import interval, span_nanoseconds
 
@@ -76,10 +76,12 @@ KEYWORD_DYADS = {
     "xcol",
     "insert",
     "xbar",
+    "xexp",
     *WINDOW_DYADS,
 }
 MONADS = (
-    WINDOW_MONADS
+    {"signum", "trim", "ltrim", "rtrim"}
+    | WINDOW_MONADS
     | {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
     | set(AGGREGATES)
     | set(MONADIC)
@@ -107,7 +109,7 @@ TOKEN = re.compile(
   | (?P<num>0[NnWw][a-z]?|\d+(?:\.\d*)?(?:e[+-]?\d+)?[a-z]?|\.\d+(?:e[+-]?\d+)?[a-z]?)
   | (?P<sym>(?:`[A-Za-z0-9_.:]*)+)
   | (?P<name>[A-Za-z][A-Za-z0-9_.]*)
-  | (?P<op>~\\:|<>|<=|>=|[=<>+\-*%&|^#~,!@$?_])
+  | (?P<op>~\\:|,'|,\\:|,/:|<>|<=|>=|[=<>+\-*%&|^#~,!@$?_])
   | (?P<punct>[()\[\];:])
     """,
     re.VERBOSE,
@@ -306,6 +308,14 @@ class Statement:
             self.next()
             right = self.expr(stop)
             return self.dyad(tok.text, left, right)
+        if tok.kind == "num" and tok.text == "0N" and not tok.value:
+            # v 0N, (enlist 1) 0N: a null of v's type, the generator's
+            # spelling of SQL's NULL beside a typed value.
+            if isinstance(left, (exp.Column, exp.Paren)) or (
+                isinstance(left, exp.Paren) and isinstance(left.this, Enlisted)
+            ):
+                self.next()
+                return TypedNull(this=left)
         if isinstance(left, exp.Column) and self.starts_term():
             # Juxtaposition: x where not null x indexes x.
             return Index(this=left, expression=self.expr(stop))
@@ -313,7 +323,11 @@ class Statement:
 
     def starts_term(self) -> bool:
         tok = self.peek()
-        return tok is not None and (tok.kind in NOUN_END or tok.text in ("(",))
+        if tok is None:
+            return False
+        if tok.text == "?" and self.is_("[", 1):
+            return True  # ?[...]
+        return tok.kind in NOUN_END or tok.text in ("(",)
 
     def term(self, stop: set[str]) -> exp.Expr:
         tok = self.next()
@@ -340,7 +354,7 @@ class Statement:
                 return exp.Literal.string(tok.value[0])
             return Rows(items=[exp.Literal.string(v) for v in tok.value])
         if tok.kind == "lambda":
-            return self.lambda_call(tok.text)
+            return self.lambda_call(tok.text, stop)
         if tok.text == "(":
             return self.parenthesised()
         if tok.text == "?" and self.is_("["):
@@ -384,7 +398,17 @@ class Statement:
         if word == "string":
             return exp.Cast(this=arg, to=exp.DataType.build("VARCHAR"))
         if word in AGGREGATES:
+            if isinstance(arg, Index) and isinstance(arg.expression, Where_):
+                # sum x where c: SUM(x) FILTER (WHERE c)
+                agg = AGGREGATES[word](this=arg.this)
+                return exp.Filter(this=agg, expression=exp.Where(this=arg.expression.this))
             return AGGREGATES[word](this=arg)
+        if word == "signum":
+            return exp.Sign(this=arg)
+        if word in ("trim", "ltrim", "rtrim"):
+            inner = arg.this if isinstance(arg, exp.Cast) else arg
+            position = {"ltrim": "LEADING", "rtrim": "TRAILING"}.get(word)
+            return exp.Trim(this=inner, position=position)
         if word in MONADIC:
             return MONADIC[word](this=arg)
         if word in WINDOW_MONADS:
@@ -396,6 +420,17 @@ class Statement:
                 return exp.Count(this=exp.Distinct(expressions=[arg.this.this]))
             if non_null(arg):
                 return exp.Count(this=arg.this)
+            if (
+                isinstance(arg, Index)
+                and isinstance(arg.this, exp.Column)
+                and arg.this.name == "i"
+                and isinstance(arg.expression, Where_)
+            ):
+                # count i where c: COUNT(*) FILTER (WHERE c)
+                return exp.Filter(
+                    this=exp.Count(this=exp.Star()),
+                    expression=exp.Where(this=arg.expression.this),
+                )
             self.fail("count is only read as COUNT(*), COUNT(x) and COUNT(DISTINCT x)")
         if word == "enlist":
             # enlist "a" is the one-character string; ([] x:enlist v) is a
@@ -428,6 +463,9 @@ class Statement:
         arg = self.expr(stop)
         if type_name == "" and isinstance(arg, exp.Cast):
             return arg  # `$string x
+        if type_name == "" and isinstance(bare(arg), (Joins, exp.Trim)):
+            arg = bare(arg)
+            return concat(self, arg) if isinstance(arg, Joins) else arg
         if type_name in PART_CASTS:
             return exp.Extract(this=exp.var(PART_CASTS[type_name]), expression=arg)
         kind = CASTS.get(type_name)
@@ -437,7 +475,25 @@ class Statement:
             kind = exp.DataType.Type.VARCHAR
         return exp.Cast(this=arg, to=exp.DataType(this=kind))
 
-    def lambda_call(self, text: str) -> exp.Expr:
+    def lambda_call(self, text: str, stop: set[str]) -> exp.Expr:
+        nulls = NULL_ORDER.match(text)
+        if nulls:
+            # {x iasc null x`k} r: r with k's nulls moved last (or, with
+            # idesc, first), the generator's spelling of NULLS LAST/FIRST.
+            # A lambda applies to all of the expression on its right.
+            target = self.expr(stop)
+            return null_order(self, target, nulls[2], first=nulls[1] == "idesc")
+        if text in (ROUND, ROUND_TO, INT_DIV):
+            if text == ROUND:
+                return exp.Round(this=self.expr(stop))
+            self.expect("[")
+            x = self.expr(set())
+            self.expect(";")
+            y = self.expr(set())
+            self.expect("]")
+            if text == ROUND_TO:
+                return exp.Round(this=x, decimals=y)
+            return exp.IntDiv(this=x, expression=y)
         if text != SPREAD or not self.is_("["):
             self.fail("a lambda has no SQL form")
         self.next()
@@ -462,7 +518,7 @@ class Statement:
         if len(items) > 1:
             return Rows(items=items)
         inner = items[0]
-        if is_query(inner) or isinstance(inner, (exp.Subquery, Sorted)):
+        if is_query(inner) or isinstance(inner, (exp.Subquery, Sorted, Renamed)):
             return inner
         return exp.Paren(this=inner)
 
@@ -487,6 +543,12 @@ class Statement:
         self.expect(";")
         other = self.expr(set())
         self.expect("]")
+        least = least_of(cond, then, other)
+        if least is not None:
+            return least
+        then = exp.Null() if isinstance(then, TypedNull) else then
+        if isinstance(other, TypedNull):
+            other = None  # no ELSE
         ifs = [exp.If(this=cond, true=then)]
         # ?[a;b;?[c;d;e]] is one CASE with two WHENs.
         if isinstance(other, exp.Case) and other.this is None:
@@ -527,8 +589,25 @@ class Statement:
             # = on a string compares it character by character; SQL's = on
             # strings is q's ~\: (match each).
             self.fail("= on a string compares characters: SQL equality is ~\\:")
+        if op in ("|", "&", "or", "and") and not (boolean(left) and boolean(right)):
+            # | and & are max and min; only between conditions are they OR
+            # and AND. max skips a null as GREATEST does; & does not, so a
+            # bare min has no SQL form (least_of reads the generator's).
+            if op in ("&", "and"):
+                return QMin(this=left, expression=right)
+            items = right.expressions if isinstance(right, exp.Greatest) else []
+            first = right.this if isinstance(right, exp.Greatest) else right
+            # ignore_nulls: as DuckDB's GREATEST, which skips a null.
+            return exp.Greatest(this=left, expressions=[first, *items], ignore_nulls=True)
         if op in GLYPHS:
             return GLYPHS[op](this=left, expression=right)
+        if op in (",'", ",\\:", ",/:", ",") and (text_part(left) or text_part(right)):
+            parts = []
+            for side in (bare(left), bare(right)):
+                parts += side.expressions if isinstance(side, Joins) else [side]
+            return Joins(expressions=parts)
+        if op == "xexp":
+            return exp.Pow(this=left, expression=right)
         if op == "$" and isinstance(left, exp.Paren) and isinstance(left.this, Index):
             fn = left.this.this
             if isinstance(fn, exp.Column) and fn.name == "type":
@@ -694,12 +773,22 @@ class Statement:
 
     def delete(self, stop: set[str]) -> exp.Expr:
         if not self.is_("from"):
-            name = self.next()
+            names = [self.next().text]
+            while self.is_(","):
+                self.next()
+                names.append(self.next().text)
             self.expect("from")
-            ns = self.next()
-            if ns.kind != "sym" or ns.value != ["."]:
-                self.fail("delete t from `. is the only delete of a name read")
-            target = table(self, name.text)
+            ns = self.peek()
+            if not (ns and ns.kind == "sym" and ns.value == ["."]):
+                # delete a,b from a table value: SELECT * EXCLUDE (a, b).
+                source = self.expr(stop)
+                if not is_query(source):
+                    self.fail("delete of columns is read from a query, as SELECT * EXCLUDE")
+                return excluded(self, names, source)
+            self.next()
+            if len(names) != 1:
+                self.fail("delete of several names from `. has no SQL form")
+            target = table(self, names[0])
             # sqlglot moved DROP's table from `this` to a `tables` list in 30.x.
             if "tables" in exp.Drop.arg_types:
                 return exp.Drop(tables=[target], kind="TABLE")
@@ -757,6 +846,30 @@ class QCall(exp.Expression):
     xprev, msum and so on. windows_read.py turns them into windows."""
 
     arg_types = {"this": True, "fn": True, "n": False}
+
+
+class Renamed(exp.Expression):
+    """update a:k from u: u with k copied to a, a join side."""
+
+    arg_types = {"this": True, "pairs": True}
+
+
+class TypedNull(exp.Expression):
+    """v 0N: a null of v's type."""
+
+    arg_types = {"this": True}
+
+
+class QMin(exp.Expression):
+    """x&y on values: q's min, which does not skip a null."""
+
+    arg_types = {"this": True, "expression": True}
+
+
+class Joins(exp.Expression):
+    """Text joined with , ,' ,\\: or ,/: : SQL's CONCAT once `$ casts it."""
+
+    arg_types = {"expressions": True}
 
 
 class Chars(exp.Expression):
@@ -891,11 +1004,28 @@ def source_table(parser: Statement, source: exp.Expr) -> tuple[exp.Expr, list[ex
     if isinstance(source, Joined):
         left, joins = source_table(parser, source.this)
         right = source.expression
+        renamed = {}
+        if isinstance(right, Renamed):
+            renamed = dict(right.args["pairs"])
+            right = right.this
         right = exp.Subquery(this=right) if is_query(right) else as_table(parser, right)
         keys = source.args["keys"]
         side = source.args.get("side")
         if side == "CROSS":
             join = exp.Join(this=right, kind="CROSS")
+        elif renamed:
+            # ON t.a = u.k: the right side's key was copied to the left's name.
+            lname, rname = left.alias_or_name, right.alias_or_name
+            if not (lname and rname) or set(renamed) - set(keys):
+                parser.fail("a renamed join side is read between two named tables")
+            conds = [
+                exp.EQ(
+                    this=exp.column(k, table=lname),
+                    expression=exp.column(renamed.get(k, k), table=rname),
+                )
+                for k in keys
+            ]
+            join = exp.Join(this=right, on=conjunction(conds), side=side or None)
         else:
             using = [exp.to_identifier(k) for k in keys]
             join = exp.Join(
@@ -968,7 +1098,8 @@ def ordered(parser: Statement, cols: exp.Expr, target: exp.Expr, desc: bool) -> 
         if isinstance(cols, Rows)
         else parser.fail("xasc takes a symbol list")
     )
-    terms = [exp.Ordered(this=exp.column(n), desc=desc) for n in names]
+    # q's own null order, said out loud: SQL dialects differ on the default.
+    terms = [exp.Ordered(this=exp.column(n), desc=desc, nulls_first=not desc) for n in names]
     if isinstance(target, exp.Paren):
         target = target.this
     if isinstance(target, (exp.Column, Sorted)):
@@ -1047,6 +1178,10 @@ def inserted(parser: Statement, table: exp.Expr, values: exp.Expr) -> exp.Expr:
 
 
 HELPERS = (
+    Renamed,
+    TypedNull,
+    QMin,
+    Joins,
     QCall,
     Enlisted,
     Chars,
@@ -1072,3 +1207,113 @@ def no_from(parser: Statement, table: TableLiteral) -> exp.Expr:
     return exp.Select(
         expressions=[exp.alias_(v.this, n) for n, v in zip(names, values, strict=True)]
     )
+
+
+NULL_ORDER = re.compile(r"\{x (iasc|idesc) null x`([A-Za-z][A-Za-z0-9_]*)\}\Z")
+
+BOOLEAN = (
+    exp.EQ,
+    exp.NEQ,
+    exp.GT,
+    exp.GTE,
+    exp.LT,
+    exp.LTE,
+    exp.Not,
+    exp.Is,
+    exp.In,
+    exp.Between,
+    exp.Like,
+    exp.ILike,
+    exp.And,
+    exp.Or,
+    exp.Boolean,
+)
+
+
+def boolean(node: exp.Expr) -> bool:
+    """Whether a q operand is a condition, so | and & between two of them
+    are OR and AND."""
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return isinstance(node, BOOLEAN)
+
+
+def bare(node: exp.Expr) -> exp.Expr:
+    while isinstance(node, exp.Paren):
+        node = node.this
+    return node
+
+
+def least_of(cond, then, other):
+    """?[null x;y;?[null y;x;x&y]], the generator's LEAST(x, y)."""
+    if not (isinstance(cond, exp.Is) and isinstance(other, exp.Case) and other.this is None):
+        return None
+    x, y = cond.this, then
+    ifs = other.args["ifs"]
+    if len(ifs) != 1:
+        return None
+    inner = ifs[0]
+    rest = bare(other.args.get("default")) if other.args.get("default") else None
+    if not (
+        isinstance(inner.this, exp.Is)
+        and inner.this.this == y
+        and inner.args["true"] == x
+        and isinstance(rest, QMin)
+        and rest.this == x
+        and rest.expression == y
+    ):
+        return None
+    first = bare(x)
+    items = [*first.expressions] if isinstance(first, exp.Least) else []
+    head = first.this if isinstance(first, exp.Least) else x
+    return exp.Least(this=head, expressions=[*items, y], ignore_nulls=True)
+
+
+def text_part(node: exp.Expr) -> bool:
+    node = bare(node)
+    return isinstance(node, (Chars, Joins)) or (
+        isinstance(node, exp.Cast) and node.to.this == exp.DataType.Type.VARCHAR
+    )
+
+
+def concat(parser, joins) -> exp.Expr:
+    parts = []
+    for part in joins.expressions:
+        part = bare(part)
+        if isinstance(part, exp.Cast) and part.to.this == exp.DataType.Type.VARCHAR:
+            part = part.this  # string x
+        if isinstance(part, Chars):
+            part = exp.Literal.string(part.this)
+        parts.append(part)
+    return exp.Concat(expressions=parts, safe=True, coalesce=True)
+
+
+def null_order(parser, target, key: str, first: bool):
+    from sqlglot_q.parser import Sorted
+
+    node = target.this if isinstance(target, exp.Paren) else target
+    order = node.args.get("order") if isinstance(node, (exp.Select, exp.Union, Sorted)) else None
+    if order is None:
+        parser.fail("a null sort is read only after a sort on its key")
+    for term in order.expressions:
+        if isinstance(term.this, exp.Column) and term.this.name == key:
+            term.set("nulls_first", first)
+            return node
+    parser.fail(f"a null sort on {key} with no sort on {key} ahead of it")
+
+
+def excluded(parser, names, source) -> exp.Select:
+    cols = [exp.column(n) for n in names]
+    plain = (
+        isinstance(source, exp.Select)
+        and len(source.expressions) == 1
+        and isinstance(source.expressions[0], exp.Star)
+        and not source.expressions[0].args.get("except_")
+    )
+    if plain:
+        source = source.copy()
+        source.expressions[0].set("except_", cols)
+        return source
+    node = exp.Select(expressions=[exp.Star(except_=cols)])
+    node.set("from_", exp.From(this=exp.Subquery(this=source)))
+    return node

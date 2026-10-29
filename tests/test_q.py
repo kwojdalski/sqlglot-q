@@ -254,17 +254,18 @@ class TestWindows(Validator):
         rows = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
         self.validate(
             f"SELECT SUM(x) OVER (PARTITION BY g ORDER BY o {rows}) AS s FROM t",
-            "select s from (update s:sums x by g from (`o xasc t))",
+            "select s from (update s:sums x by g from ({x iasc null x`o} (`o xasc t)))",
         )
         # The default frame is RANGE: rows tied on o share the last value.
+        # DuckDB sorts o's nulls last, q first: {x iasc null x`o} moves them.
         self.validate(
-            "SELECT SUM(x) OVER (PARTITION BY g ORDER BY o) AS s FROM t",
+            "SELECT SUM(x) OVER (PARTITION BY g ORDER BY o NULLS FIRST) AS s FROM t",
             "select s from (update s:last s by g,o from (update s:sums x by g from (`o xasc t)))",
         )
 
     def test_ranking_offsets_and_moving(self):
         self.validate(
-            "SELECT ROW_NUMBER() OVER (PARTITION BY g ORDER BY o) AS n FROM t",
+            "SELECT ROW_NUMBER() OVER (PARTITION BY g ORDER BY o NULLS FIRST) AS n FROM t",
             "select n from (update n:1+til count i by g from (`o xasc t))",
         )
         self.validate(
@@ -272,11 +273,12 @@ class TestWindows(Validator):
             "select r from (update r:1+o?o from (`o xdesc t))",
         )
         self.validate(
-            "SELECT LEAD(x, 2) OVER (ORDER BY o) AS n FROM t",
+            "SELECT LEAD(x, 2) OVER (ORDER BY o NULLS FIRST) AS n FROM t",
             "select n from (update n:-2 xprev x from (`o xasc t))",
         )
         self.validate(
-            "SELECT AVG(x) OVER (ORDER BY o ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS m FROM t",
+            "SELECT AVG(x) OVER (ORDER BY o NULLS FIRST ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) "
+            "AS m FROM t",
             "select m from (update m:3 mavg x from (`o xasc t))",
         )
 
@@ -290,7 +292,7 @@ class TestWindows(Validator):
         sql = sqlglot.parse_one("update s:sums x by g from `o xasc t", read="q").sql("duckdb")
         self.assertEqual(
             sql,
-            "SELECT *, SUM(x) OVER (PARTITION BY g ORDER BY o ASC "
+            "SELECT *, SUM(x) OVER (PARTITION BY g ORDER BY o ASC NULLS FIRST "
             "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM t",
         )
 
@@ -326,8 +328,8 @@ class TestStatements(Validator):
 class TestRefusals(Validator):
     def test_unsupported_constructs_raise_by_default(self):
         self.refuses("SELECT a FROM t FULL JOIN u ON t.k = u.k", "FULL JOIN")
-        self.refuses("SELECT a FROM t JOIN u ON t.k = u.j", "same-named columns")
-        self.refuses("SELECT CASE WHEN a > 1 THEN 1 END FROM t", "CASE without ELSE")
+        self.refuses("SELECT a FROM t JOIN u ON k = j", "told apart")
+        self.refuses("SELECT a FROM t WHERE x IS DISTINCT FROM 1", "NullSafeNEQ")
         self.refuses("SELECT count FROM t", "q keyword")
         self.refuses("SELECT a FROM db.t", "qualified table")
         self.refuses("SELECT a FROM t ORDER BY a + 1", "ORDER BY")
@@ -335,7 +337,7 @@ class TestRefusals(Validator):
 
     def test_ignore_level_still_emits_q_that_refuses(self):
         q = sqlglot.transpile(
-            "SELECT CASE WHEN a > 1 THEN 1 END FROM t",
+            "SELECT a FROM t FULL JOIN u ON t.k = u.k",
             write="q",
             unsupported_level=ErrorLevel.IGNORE,
         )[0]

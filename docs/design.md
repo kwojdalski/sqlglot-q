@@ -28,6 +28,17 @@ Each of these was measured in q 5 and is pinned by `tests/integration`.
 | `AND` in WHERE | `&` | | a q where list, `where p, q`: same rows, and q filters progressively |
 | `COALESCE(a,b)` | | | `b^a` |
 | `x.y` qualifier | | q columns are unqualified | `y` |
+| `ORDER BY x` (DuckDB: nulls last) | `` `x xasc t `` | q sorts nulls first ascending | `` {x iasc null x`x} (`x xasc t) ``: a stable re-sort on whether x is null |
+| `CASE WHEN c THEN v END`, `NULLIF(a, b)` | `?[c;v;0N]` | a long null in a symbol column makes a mixed list | `?[c;v;v 0N]`: a null of v's own type |
+| `LEAST(a, b)` | `a&b` | `&` does not skip a null, and `x^2` (fill an atom) is `'nyi` | `?[null a;b;?[null b;a;a&b]]` |
+| `GREATEST(a, b)` | | | `a|b`: `|` skips a null as GREATEST does |
+| `ROUND(x)`, `ROUND(x, n)` | | q has no round; SQL rounds half away from zero | `{signum[x]*floor 0.5+abs x} x` |
+| `a // b` | `a div b` | `div` floors (-7 div 2 is -4); `//` truncates (-3) | `{signum[x*y]*div[abs x;abs y]}[a;b]` |
+| `SUM(x) FILTER (WHERE c)` | | | `sum x where c`; `COUNT(*) FILTER` is `count i where c` |
+| `a || b`, `CONCAT(a, b)` | `a,b` | `,` joins the lists, not each row's text | `` `$(string a),'string b ``; `,\:` and `,/:` against a literal; `||` guards nulls, CONCAT skips them |
+| `JOIN u ON t.a = u.k` | | the keys are named differently | `` ej[`a;t;update a:k from u] ``: u keeps k and gains a copy named a |
+| `RIGHT JOIN` | | | the LEFT JOIN the other way round |
+| `SELECT * EXCLUDE (a)` | | | `delete a from select from t` |
 | `DATE '2024-01-15'` | | a typed string in SQL | `2024.01.15` (timestamps `...D09:30:00.000000000`, times `09:30:00.000`) |
 | `INTERVAL '5' MINUTE` | | | the timespan `0D00:05:00.000000000`; months and years have no fixed length and are refused |
 | `EXTRACT(MINUTE FROM t)` | | | `` `uu$t `` (`year`, `mm`, `dd`, `hh`, `uu`, `ss`) |
@@ -77,6 +88,7 @@ state faithfully:
 | `where px:1` | an assignment, not a condition |
 | `update ... from t`, `delete c from t` | return a new table; SQL's change one |
 | a q keyword as a name | the writer could not name it back |
+| `x&y`, `x and y` on values | q's min, which keeps a null; only between conditions is it AND (`size=1 and side=0` is `size=(1 and side=0)`) |
 
 ## Round trips
 
@@ -100,6 +112,11 @@ becomes `0!select ... by`); the second must not.
   with no match, which aj keeps, and is refused.
 - A running `SUM` over a partition's leading nulls is 0 in q and NULL in
   SQL. A window's alias that is also a source column replaces it in q.
+- A symbol cannot start or end with a space (`` `$ `` trims), so in the
+  default symbol mode `TRIM` has nothing to remove and a `CONCAT` that would
+  start or end with one is refused; use `string_literals="string"`.
+- In q a null symbol is the empty symbol, so SQL's `''` and `NULL` text are
+  one value there.
 - `UNION` matches columns by name in q and by position in SQL.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.

@@ -111,9 +111,13 @@ def plan(gen: QGenerator, win: exp.Window):
         raise Refused("a named window or a window with FIRST has no q form")
     parts = keys(gen, win.args.get("partition_by") or [], "PARTITION BY")
     order = win.args.get("order")
-    ordered = [(o.this, bool(o.args.get("desc"))) for o in (order.expressions if order else [])]
-    order_cols = keys(gen, [c for c, _ in ordered], "ORDER BY in a window")
-    terms = list(zip(order_cols, [d for _, d in ordered], strict=True))
+    from sqlglot_q.query import null_fix
+
+    orders = order.expressions if order else []
+    order_cols = keys(gen, [o.this for o in orders], "ORDER BY in a window")
+    terms = [
+        (c, bool(o.args.get("desc")), null_fix(o)) for c, o in zip(order_cols, orders, strict=True)
+    ]
     value, tie_fix, needs_order = function(gen, win, order_cols, bool(terms))
     if needs_order and not terms:
         raise Refused(f"{win.this.sql()} OVER needs an ORDER BY to have a q form")
@@ -129,7 +133,7 @@ def stage(gen: QGenerator, plan, value: str, tie_fix: bool, name: str, source: s
     by = f" by {','.join(parts)}" if parts else ""
     text = f"update {name}:{value}{by} from {wrap(src)}"
     if tie_fix:
-        peers = ",".join([*parts, *[c for c, _ in terms]])
+        peers = ",".join([*parts, *[t[0] for t in terms]])
         text = f"update {name}:last {name} by {peers} from ({text})"
     return text
 

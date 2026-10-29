@@ -33,3 +33,6 @@ delete from `.finos.init.priv.hooks where fun in hookNames
 select from use where date<enddate+1
 / refused: fnm in z tests against the items of z, SQL's IN (z) against z
 select from cd where fnm in z
+/ refused: q reads right to left, so this is size=(1 and side=0), and on a
+/ number "and" is min: not SQL's size = 1 AND side = 0
+select from trades where size=1 and side=0

@@ -21,6 +21,16 @@ MOVING = {"msum": exp.Sum, "mavg": exp.Avg, "mmax": exp.Max, "mmin": exp.Min}
 def window_stage(parser, items, keys, source) -> exp.Expr:
     from sqlglot_q.parser import QCall, Sorted, is_query, non_null
 
+    if (
+        not keys
+        and items
+        and all(isinstance(i, exp.Alias) and isinstance(i.this, exp.Column) for i in items)
+    ):
+        # update a:k from u: u with a copy of k named a, the generator's
+        # right side of a join ON t.a = u.k.
+        from sqlglot_q.parser import Renamed
+
+        return Renamed(this=source, pairs=[(i.alias, i.this.name) for i in items])
     if len(items) != 1 or not isinstance(items[0], exp.Alias):
         parser.fail("update of a table value is read as one window, name:value")
     name, value = items[0].alias, items[0].this

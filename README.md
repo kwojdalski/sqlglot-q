@@ -66,6 +66,12 @@ licence, such as the free personal one). The translation does not.
 - comparisons, `AND`/`OR`/`NOT`, `IN` (lists and subqueries), `BETWEEN`,
   `LIKE`/`ILIKE`, `IS [NOT] NULL`, arithmetic, `CASE`, `CAST`, `COALESCE`,
   `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`, and common scalar functions
+- `GREATEST`, `LEAST`, `NULLIF`, `ROUND`, `POWER`, `SIGN`, integer `//`,
+  `TRIM`/`LTRIM`/`RTRIM`, `CONCAT` and `||`, aggregates with `FILTER (WHERE
+  ...)`, and `CASE` without `ELSE`
+- `ORDER BY ... NULLS FIRST/LAST`, and DuckDB's default of nulls last
+- joins on differently named keys (`ON t.a = u.k`), `RIGHT JOIN`,
+  `FROM t, u`, and `SELECT * EXCLUDE (...)`
 - `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`
 - dates, timestamps and times (`DATE '2024-01-15'` is `2024.01.15`), fixed
   intervals as timespans, `EXTRACT`/`YEAR`/`MONTH`/...

@@ -65,7 +65,14 @@ MONADIC = {
     exp.Sqrt: "sqrt",
     exp.Exp: "exp",
     exp.Ln: "log",
+    exp.Sign: "signum",
 }
+
+# Spelled as lambdas because q has no word for them; parser.py reads these
+# exact texts back.
+ROUND = "{signum[x]*floor 0.5+abs x}"  # half away from zero, as SQL
+ROUND_TO = "{(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y}"
+INT_DIV = "{signum[x*y]*div[abs x;abs y]}"  # toward zero; q's div floors
 
 # SQL type names to the q type each casts to, and the empty list a new column
 # of that type starts as. Text is a symbol unless string_literals="string".
@@ -328,7 +335,115 @@ class QGenerator(Generator):
     def monadic(self, node: exp.Expr) -> str:
         return f"{MONADIC[type(node)]} {self.sql(node.this)}"
 
-    q_abs = q_upper = q_lower = q_floor = q_ceil = q_sqrt = q_exp = q_ln = monadic
+    q_abs = q_upper = q_lower = q_floor = q_ceil = q_sqrt = q_exp = q_ln = q_sign = monadic
+
+    def q_round(self, node: exp.Round) -> str:
+        places = node.args.get("decimals")
+        if places is None:
+            return f"{ROUND} {self.operand(node.this)}"
+        return f"{ROUND_TO}[{self.sql(node.this)};{self.sql(places)}]"
+
+    def q_pow(self, node: exp.Pow) -> str:
+        return f"{self.operand(node.this)} xexp {self.operand(node.expression)}"
+
+    def q_intdiv(self, node: exp.IntDiv) -> str:
+        return f"{INT_DIV}[{self.sql(node.this)};{self.sql(node.expression)}]"
+
+    def q_greatest(self, node: exp.Greatest) -> str:
+        # | is q's max, and like GREATEST it skips a null: 1|0N is 1.
+        return "|".join(self.operand(i) for i in [node.this, *node.expressions])
+
+    def q_least(self, node: exp.Least) -> str:
+        # & is q's min, but 1&0N is 0N where LEAST skips the null. Filling
+        # each side from the other (y^x) fails when a side is a literal atom
+        # ('nyi), so the nulls are taken apart with ?[...], which also
+        # promotes a long against a float as SQL does.
+        items = [node.this, *node.expressions]
+        text = self.operand(items[0])
+        for item in items[1:]:
+            x, y = text, self.operand(item)
+            text = f"?[null {x};{y};?[null {y};{x};{x}&{y}]]"
+        return text
+
+    def q_nullif(self, node: exp.Nullif) -> str:
+        case = exp.Case(
+            ifs=[
+                exp.If(
+                    this=exp.EQ(this=node.this.copy(), expression=node.expression.copy()),
+                    true=exp.Null(),
+                )
+            ],
+            default=node.this.copy(),
+        )
+        return self.q_case(case)
+
+    def q_filter(self, node: exp.Filter) -> str:
+        agg, cond = node.this, node.expression.this
+        where = self.sql(cond)
+        if isinstance(agg, exp.Count) and (agg.this is None or isinstance(agg.this, exp.Star)):
+            return f"count i where {where}"
+        if type(agg) in AGGREGATES and not agg.args.get("distinct"):
+            return f"{AGGREGATES[type(agg)]} {self.operand(agg.this)} where {where}"
+        return self.refuse(f"{agg.sql()} FILTER (...) has no q translation here")
+
+    def q_trim(self, node: exp.Trim) -> str:
+        if node.expression is not None or node.args.get("collation"):
+            return self.refuse("TRIM of characters other than spaces has no q translation here")
+        word = {"LEADING": "ltrim", "TRAILING": "rtrim"}.get(
+            (node.args.get("position") or "").upper(), "trim"
+        )
+        arg = self.operand(node.this)
+        return f"`$({word} string {arg})" if self.symbols else f"{word} {arg}"
+
+    def q_concat(self, node: exp.Concat) -> str:
+        return self.joined([node.this, *node.expressions] if node.this else node.expressions)
+
+    def q_dpipe(self, node: exp.DPipe) -> str:
+        text = self.joined(flatten_dpipe(node))
+        columns = []
+        for part in flatten_dpipe(node):
+            if not isinstance(part, exp.Literal) and part not in columns:
+                columns.append(part)
+        if not columns:
+            return text
+        # || is NULL when any side is; CONCAT skips nulls.
+        guards = [f"null {self.operand(c)}" for c in columns]
+        guard = guards[0] if len(guards) == 1 else "|".join(f"({g})" for g in guards)
+        empty = "`" if self.symbols else '""'
+        return f"?[{guard};{empty};{text}]"
+
+    def joined(self, parts: list[exp.Expr]) -> str:
+        """Text parts joined row by row: ,' between two columns, ,\\: and ,/:
+        where one side is a literal, so a literal string is not paired item
+        by item with the rows."""
+        pieces = []
+        for part in parts:
+            if isinstance(part, exp.Literal) and part.is_string:
+                pieces.append((self.chars(part.this), True))
+            elif self.symbols:
+                pieces.append((f"string {self.operand(part)}", False))
+            else:
+                pieces.append((self.operand(part), False))
+        if self.symbols:
+            first, last = parts[0], parts[-1]
+            for part, edge in ((first, str.lstrip), (last, str.rstrip)):
+                if (
+                    isinstance(part, exp.Literal)
+                    and part.is_string
+                    and edge(part.this) != part.this
+                ):
+                    # `$ trims a symbol's ends: the space would be lost.
+                    return self.refuse(
+                        "a symbol cannot start or end with a space: concatenate with "
+                        'string_literals="string"'
+                    )
+        text, atom = pieces[0]
+        for piece, lit in pieces[1:]:
+            left = text if " " not in text else f"({text})"
+            right = piece if " " not in piece else f"({piece})"
+            glyph = "," if atom and lit else ",\\:" if lit else ",/:" if atom else ",'"
+            text, atom = f"{left}{glyph}{right}", atom and lit
+        return f"`$({text})" if self.symbols else text
 
     def q_length(self, node: exp.Length) -> str:
         arg = self.sql(node.this)
@@ -415,15 +530,27 @@ class QGenerator(Generator):
 
     def q_case(self, node: exp.Case) -> str:
         default = node.args.get("default")
-        if default is None:
-            return self.refuse("CASE without ELSE: q needs a value of the right type for no match")
+        branches = [w.args["true"] for w in node.args["ifs"]] + [default]
+        known = next((b for b in branches if b is not None and not isinstance(b, exp.Null)), None)
+
+        def value(b) -> str:
+            if b is not None and not isinstance(b, exp.Null):
+                return self.sql(b)
+            # No ELSE, or THEN NULL: a null of the other branches' type, so
+            # ?[...] does not mix a long null into a symbol column.
+            if known is None:
+                return "0N"
+            if isinstance(known, (exp.Literal, exp.Boolean)) or atomic_literal(known):
+                return f"(enlist {self.sql(known)}) 0N"
+            return f"{self.operand(known)} 0N"
+
         subject = node.this
-        text = self.sql(default)
+        text = value(default)
         for when in reversed(node.args["ifs"]):
             cond = when.this
             if subject is not None:
                 cond = exp.EQ(this=subject.copy(), expression=cond.copy())
-            text = f"?[{self.sql(cond)};{self.sql(when.args['true'])};{text}]"
+            text = f"?[{self.sql(cond)};{value(when.args['true'])};{text}]"
         return text
 
     def q_if(self, node: exp.If) -> str:
@@ -584,6 +711,18 @@ def xbar_width(node: exp.Expr) -> exp.Expr | None:
             floor.set("this", div)
         return node.expression
     return None
+
+
+def atomic_literal(node: exp.Expr) -> bool:
+    return isinstance(node, exp.Neg) and isinstance(node.this, exp.Literal)
+
+
+def flatten_dpipe(node: exp.Expr) -> list[exp.Expr]:
+    if isinstance(node, exp.Paren) and isinstance(node.this, exp.DPipe):
+        node = node.this
+    if isinstance(node, exp.DPipe):
+        return [*flatten_dpipe(node.this), *flatten_dpipe(node.expression)]
+    return [node]
 
 
 def unalias(node: exp.Expr) -> exp.Expr:
