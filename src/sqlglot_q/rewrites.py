@@ -369,3 +369,28 @@ def correlated_scalars(expression: exp.Expr) -> exp.Expr:
     if joins:
         expression.set("joins", [*(expression.args.get("joins") or []), *joins])
     return expression
+
+
+def table_star(expression: exp.Expr) -> exp.Expr:
+    """SELECT t.* FROM t is SELECT * FROM t. (Over a join, t.* is one side's
+    columns, which q's joined table does not keep apart: refused.)"""
+    if not isinstance(expression, exp.Select) or expression.args.get("joins"):
+        return expression
+    from_ = expression.args.get("from_")
+    if from_ is None:
+        return expression
+    name = from_.this.alias_or_name
+    items = expression.expressions
+    if not any(isinstance(i, exp.Column) and isinstance(i.this, exp.Star) for i in items):
+        return expression
+    expression = expression.copy()
+    expression.set(
+        "expressions",
+        [
+            exp.Star()
+            if isinstance(i, exp.Column) and isinstance(i.this, exp.Star) and i.table == name
+            else i
+            for i in expression.expressions
+        ],
+    )
+    return expression

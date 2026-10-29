@@ -105,6 +105,8 @@ def holds(gen: QGenerator, node: exp.Expr) -> str:
             node.set("expressions", values)
             # A null is in no list without a null: 0N in 1 2 is false.
             return gen.sql(node)
+        if isinstance(node.this, exp.Tuple):
+            return gen.sql(node)  # TUPLE_IN keeps nulls out itself
         # A subquery can hold a null, and 0N in (...;0N) is true.
         return guarded(gen, [node.this], gen.sql(node))
     if isinstance(node, exp.Between):
@@ -153,6 +155,8 @@ def fails(gen: QGenerator, node: exp.Expr) -> str:
             if any(isinstance(v, exp.Null) for v in node.expressions):
                 return "0b"  # x NOT IN (..., NULL) is never true
             return guarded(gen, [node.this], f"not {gen.sql(node)}")
+        if isinstance(node.this, exp.Tuple):
+            return gen.refuse("(a, b) NOT IN (SELECT ...) has no q translation here")
         # x NOT IN (SELECT ...) is never true once the subquery has a null.
         text = gen.sql(node)
         subject, _, values = text.partition(" in ")

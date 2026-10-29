@@ -36,8 +36,9 @@ def window_stage(parser, items, keys, source) -> exp.Expr:
         and items
         and all(isinstance(i, exp.Alias) for i in items)
         and all(function(parser, i.this, None, non_null, QCall) is None for i in items)
-        and not any(i.this.find(QCall) for i in items)
+        and not any(i.this.find(QCall, *AGGREGATE) for i in items)
     ):
+        # (An aggregate in it is a window over the whole table, read below.)
         # update a:e from t: SELECT *, e AS a, the generator's columns beside *.
         return star_select(parser, [exp.Star(), *items], source)
     if len(items) != 1 or not isinstance(items[0], exp.Alias):

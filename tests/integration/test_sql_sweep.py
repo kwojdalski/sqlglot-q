@@ -45,6 +45,23 @@ QUERIES = [
     "SELECT DATE_TRUNC('month', DATE '2024-02-10') AS a, DATE_TRUNC('day', DATE '2024-05-10') AS b",
     "SELECT d, DATE_TRUNC('day', d) AS a, DATE_TRUNC('hour', d) AS b FROM t",
     "SELECT ABS(-3) AS a, ROUND(2.567, 2) AS b, SIGN(-2) AS c",
+    # An aggregate in an update with no by is a window over the whole table.
+    "SELECT g, n, n * 100.0 / SUM(n) OVER () AS pct FROM t",
+    "SELECT g, n, n - AVG(n) OVER () AS d, MAX(x) OVER () AS m FROM t",
+    # t.* of the one table is *.
+    "SELECT t.* FROM t WHERE n > 0",
+    "SELECT a.*, n * 2 AS dbl FROM t AS a",
+    # LIKE a pattern per row, made q's when the query runs.
+    "SELECT g, n FROM t WHERE s LIKE '%' || g || '%'",
+    "SELECT g, s FROM t WHERE s NOT LIKE g || '%'",
+    "SELECT g, s LIKE '%' || g AS m FROM t",
+    # IN (SELECT ...) before another condition: exec ... from took it in.
+    "SELECT g, v FROM u WHERE g IN (SELECT g FROM t) AND v > 15",
+    "SELECT g, v FROM u WHERE g NOT IN (SELECT g FROM t WHERE g IS NOT NULL) AND v > 5",
+    "SELECT g, v FROM u WHERE EXISTS (SELECT 1 FROM t WHERE t.g = u.g) AND g LIKE CONCAT(g, '%')",
+    # (a, b) IN (SELECT ...): rows matched whole, a null part matching nothing.
+    "SELECT g, n FROM t WHERE (g, n) IN (SELECT g, n FROM t WHERE o > 1) AND n > 0",
+    "SELECT a, w FROM t2 WHERE (a, w) IN (SELECT a, w FROM t2 WHERE w < 3)",
 ]
 
 

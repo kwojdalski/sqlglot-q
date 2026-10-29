@@ -40,6 +40,7 @@ from sqlglot_q.generator import (
     LEFT,
     LEFT_JOIN,
     LENGTH,
+    LIKE_EACH,
     MILLISECOND,
     MOD,
     MOVING_NULLS,
@@ -71,6 +72,7 @@ from sqlglot_q.generator import (
     TEXT_OF,
     TEXT_PICK,
     TRUNC,
+    TUPLE_IN,
     TYPES,
 )
 from sqlglot_q.temporal import CASTS as PART_CASTS
@@ -508,6 +510,9 @@ class Statement:
             return exp.Not(this=arg)
         if word == "any" and isinstance(arg, EqEach):
             return exp.In(this=arg.this, expressions=arg.args["items"])
+        if word == "any" and isinstance(arg, exp.Is) and isinstance(arg.this, exp.Paren):
+            if isinstance(arg.this.this, Exec):
+                arg = exp.Is(this=arg.this.this, expression=arg.expression)  # null (exec ...)
         if word == "any" and isinstance(arg, exp.Is) and isinstance(arg.this, Exec):
             return NoNulls(this=arg.this)
         if word == "null":
@@ -790,6 +795,28 @@ class Statement:
             return QCall(this=self.expr(stop), fn="sums")
         if text in (RUNNING_MAX, RUNNING_MIN):
             return QCall(this=self.expr(stop), fn="maxs" if text == RUNNING_MAX else "mins")
+        if text == TUPLE_IN and self.is_("["):
+            self.expect("[")
+            parts = self.expr(set())
+            self.expect(";")
+            query = self.expr(set())
+            self.expect("]")
+            while isinstance(query, exp.Paren):
+                query = query.this
+            items = parts.args.get("items") if isinstance(parts, Rows) else None
+            if not items or not is_query(query):
+                self.fail("(a, b) IN is read with a list of values and a query")
+            row = exp.Tuple(expressions=[literal(i) for i in items])
+            return exp.In(this=row, query=exp.Subquery(this=query))
+        if text == LIKE_EACH and self.is_("["):
+            self.expect("[")
+            subject = self.expr(set())
+            self.expect(";")
+            pattern = self.expr(set())
+            self.expect("]")
+            if isinstance(pattern, exp.Cast) and pattern.to.this == exp.DataType.Type.VARCHAR:
+                pattern = pattern.this  # string p: the symbols' text
+            return exp.Like(this=subject, expression=literal(pattern))
         if text in (INTERSECT_ALL, EXCEPT_ALL) and self.is_("["):
             self.expect("[")
             left = self.expr(set())
@@ -1069,6 +1096,8 @@ class Statement:
         if op == "~'":
             return exp.EQ(this=left, expression=right)  # strings matched row by row
         if op == "in":
+            while isinstance(right, exp.Paren) and isinstance(right.this, (Exec, exp.Paren)):
+                right = right.this  # in (exec x from ...): parenthesised in a where list
             if isinstance(right, exp.Subquery):
                 return exp.In(this=left, query=right)
             if isinstance(right, Exec):

@@ -183,6 +183,15 @@ FULL_JOIN = (
     "(ej[k;a;b] uj y where not (k#y) in k#b) uj z where not (k#z) in k#a}"
 )
 HALF_EVEN = "{f:floor x+0.5;f-(x=f-0.5)&1=f mod 2}"
+# (a, b) IN (SELECT ...): the rows as a table, in the subquery's rows that
+# have no null; a row with a null part matches nothing, as in SQL.
+TUPLE_IN = (
+    '{k:`$"x",\'string til count x;r:k xcol y;r:r where not max each null r;'
+    "(not max null x)&(flip k!x) in r}"
+)
+# x LIKE y with y a pattern per row: each made q's (% *, _ ?, q's own
+# wildcards bracketed) and matched row by row.
+LIKE_EACH = '{x like\' {raze {$[x="%";"*";x="_";"?";x in "*?[]";"[",x,"]";x]} each x} each y}'
 # A ROWS frame from a to b rows off the current one (0N: unbounded), each
 # row's slice of its partition aggregated without its nulls; NULL over none.
 # BOOL_AND and BOOL_OR over where the condition is true (x) and where it is
@@ -645,8 +654,8 @@ class QGenerator(Generator):
             # IN (1, 2.5): q's in refuses a long column against a float list
             # ('type), where = compares across them.
             return f"any {self.operand(node.this)}=/:{self.vector(items)}"
-        subject = self.operand(node.this)
         query = node.args.get("query")
+        subject = "" if isinstance(node.this, exp.Tuple) else self.operand(node.this)
         if query is not None:
             from sqlglot_q.correlated import refuse_correlated
 
@@ -654,12 +663,20 @@ class QGenerator(Generator):
             refused = refuse_correlated(self, select, "IN (SELECT ...)")
             if refused is not None:
                 return refused
+            if isinstance(node.this, exp.Tuple):
+                parts = node.this.expressions
+                if len(select.expressions) != len(parts):
+                    return self.refuse("(a, b) IN (SELECT ...) needs as many columns as parts")
+                values = ";".join(self.sql(p) for p in parts)
+                return f"{TUPLE_IN}[({values});({self.sql(select)})]"
             if len(select.expressions) != 1:
                 return self.refuse("IN (SELECT ...) needs exactly one column")
             column = select.expressions[0]
             inner = select.copy()
             inner.set("expressions", [exp.alias_(column, "x")])
-            return f"{subject} in exec x from ({self.sql(inner)})"
+            # Parenthesised: in a where list, exec ... from would take the
+            # constraints after it as part of its from.
+            return f"{subject} in (exec x from ({self.sql(inner)}))"
         return f"{subject} in {self.vector(node.expressions)}"
 
     def between_sql(self, node: exp.Between) -> str:
@@ -669,7 +686,9 @@ class QGenerator(Generator):
     def like_sql(self, node: exp.Like) -> str:
         pattern = node.expression
         if not (isinstance(pattern, exp.Literal) and pattern.is_string):
-            return self.refuse("LIKE is only translated with a literal pattern")
+            # A pattern per row: each made q's when the query runs.
+            text = f"string {self.operand(pattern)}" if self.symbols else self.sql(pattern)
+            return f"{LIKE_EACH}[{self.sql(node.this)};{text}]"
         return f"{self.operand(node.this)} like {self.chars(like_pattern(pattern.this))}"
 
     def escape_sql(self, node: exp.Escape) -> str:
@@ -1504,6 +1523,7 @@ def _select_rewrites():
         q_names,
         quantified_in,
         regex_like,
+        table_star,
     )
 
     # sqlglot's own rewrites, as its dialects use them: QUALIFY and DISTINCT
@@ -1513,6 +1533,7 @@ def _select_rewrites():
             transforms.eliminate_qualify,
             transforms.eliminate_distinct_on,
             expand_group_by_all,
+            table_star,
             quantified_in,
             correlated_scalars,
             join_conditions,
