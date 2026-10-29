@@ -1,12 +1,38 @@
 # Design
 
+## Following sqlglot's conventions
+
+The dialect is built the way sqlglot's own are, so it extends the same way:
+
+- `Q` declares its behaviour as dialect attributes: names are case
+  sensitive (`NORMALIZATION_STRATEGY`), nulls sort small (`NULL_ORDERING`),
+  and `string_literals` is a dialect setting (`SUPPORTED_SETTINGS`), so
+  `write="q, string_literals=string"` works as `"duckdb, ..."` does.
+- `QGenerator` handlers are `<key>_sql` methods and a `TRANSFORMS` table,
+  and its dispatch is built as sqlglot builds a generator's.
+- Constructs SQL can rewrite into others go through sqlglot's own rewrites
+  with `transforms.preprocess`: `QUALIFY` (`eliminate_qualify`) and `DISTINCT
+  ON` (`eliminate_distinct_on`) become a window in a subquery, which the
+  window stages then translate. `rewrites.py` adds q's own in the same shape:
+  `GROUP BY ALL`, and renaming the `_w`-style names sqlglot's rewrites add,
+  since a q name cannot start with an underscore.
+- Functions sqlglot parses as anonymous are mapped in `FUNCTIONS`, which the
+  reader reads backwards.
+
+Statistics where q and SQL agree on nulls (`sdev`, `var`, `cor`, `cov`) are
+plain `TRANSFORMS` entries. `MEDIAN` is not: q's `med` counts a null as the
+smallest value (`med 1 2 4 0n` is 1.5), so it is `med x where not null x`.
+`LOG(x)` with one argument is refused, as it is base 10 in some dialects and
+e in others, and the tree no longer says which.
+
 ## Why the generator owns dispatch
 
 sqlglot's `Generator` produces SQL, and its fallback for a node it has no
-method for is SQL text. For a SQL dialect that fallback is usually close
+method for is SQL text: every `<key>_sql` it inherits writes SQL. For a SQL dialect that fallback is usually close
 enough; for q it is wrong text that q either refuses or, worse, reads as
-something else. `QGenerator.sql` therefore dispatches only to its own
-`q_<key>` methods and refuses everything else. Adding a construct means
+something else. `QGenerator` therefore builds its dispatch from `TRANSFORMS` and the
+`<key>_sql` methods defined on it or on a subclass, never the ones inherited
+from sqlglot's generator, and refuses everything else. Adding a construct means
 adding a method, and the absence of one is a loud error.
 
 ## SQL and q, where they differ

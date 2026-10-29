@@ -72,6 +72,12 @@ licence, such as the free personal one). The translation does not.
 - `ORDER BY ... NULLS FIRST/LAST`, and DuckDB's default of nulls last
 - joins on differently named keys (`ON t.a = u.k`), `RIGHT JOIN`,
   `FROM t, u`, and `SELECT * EXCLUDE (...)`
+- `QUALIFY` and `DISTINCT ON` (through sqlglot's own rewrites), `GROUP BY ALL`
+- `MEDIAN`, `STDDEV`/`VARIANCE` (sample and population), `CORR`, `COVAR_*`,
+  `COUNT_IF`, `ANY_VALUE`, `LOG(b, x)`/`LOG10`/`LOG2`, `STARTS_WITH`,
+  `ENDS_WITH`, `CONTAINS`, `LEFT`, `RIGHT`
+- keyed tables: `PRIMARY KEY` is a keyed table, and `INSERT OR REPLACE` and
+  `ON CONFLICT DO UPDATE SET c = EXCLUDED.c` are `upsert`; `TRUNCATE`
 - `INSERT`, `UPDATE`, `DELETE`, `CREATE TABLE`, `DROP TABLE`
 - dates, timestamps and times (`DATE '2024-01-15'` is `2024.01.15`), fixed
   intervals as timespans, `EXTRACT`/`YEAR`/`MONTH`/...
@@ -105,12 +111,41 @@ q form raises `UnsupportedError` rather than producing approximate q.
 ## Options
 
 String literals become symbols (`'abc'` is `` `abc ``), which is what text
-columns usually are in kdb+. For char-vector columns:
+columns usually are in kdb+. For char-vector columns, use the dialect
+setting, as for any sqlglot dialect:
 
 ```python
-sqlglot.transpile("SELECT a FROM t WHERE s = 'ab'", write="q", string_literals="string")
+sqlglot.transpile("SELECT a FROM t WHERE s = 'ab'", write="q, string_literals=string")
 # ['select a from t where s~\\:"ab"']
 ```
+
+`string_literals="string"` as a keyword argument does the same.
+
+## Extending the dialect
+
+`Q` is extended the way any sqlglot dialect is: subclass it and its
+`Generator`. A function sqlglot does not know (a UDF) is mapped to q in
+`FUNCTIONS`, and the reader maps it back; a node gets a `<key>_sql` method
+or a `TRANSFORMS` entry:
+
+```python
+from sqlglot import exp
+from sqlglot_q import Q
+
+
+class MyQ(Q):
+    class Generator(Q.Generator):
+        FUNCTIONS = {**Q.Generator.FUNCTIONS, "VWAP": "wavg"}
+        TRANSFORMS = {**Q.Generator.TRANSFORMS, exp.Cos: lambda self, e: f"cos {self.sql(e.this)}"}
+
+
+sqlglot.transpile("SELECT VWAP(qty, px) AS w, COS(a) AS c FROM t", write=MyQ)
+# ['select w:wavg[qty;px], c:cos a from t']
+```
+
+Only methods defined on `QGenerator` or a subclass are used: one inherited
+from sqlglot's SQL generator would write SQL, so a node without a q handler
+is an `UnsupportedError` instead.
 
 ## Scoring scikit-learn models in kdb+ with orbital
 

@@ -73,6 +73,9 @@ MONADIC = {
 ROUND = "{signum[x]*floor 0.5+abs x}"  # half away from zero, as SQL
 ROUND_TO = "{(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y}"
 INT_DIV = "{signum[x*y]*div[abs x;abs y]}"  # toward zero; q's div floors
+# LEFT(s, n) and RIGHT(s, n): sublist, not #, which repeats a short string.
+LEFT = ("{`$x sublist/:string y}", "{x sublist/:y}")
+RIGHT = ("{`$(neg x) sublist/:string y}", "{(neg x) sublist/:y}")
 
 # SQL type names to the q type each casts to, and the empty list a new column
 # of that type starts as. Text is a symbol unless string_literals="string".
@@ -119,25 +122,108 @@ def atomic(node: exp.Expr) -> bool:
     )
 
 
+class QText(exp.Expression):
+    """q text standing in a tree the generator prints: a window stage's
+    value (windows.py). Printed by TRANSFORMS[QText]."""
+
+    arg_types = {"this": True}
+
+
+def expression_classes() -> dict[str, type]:
+    """sqlglot's node classes by key; exp.EXPR_CLASSES from 30.x on."""
+    known = getattr(exp, "EXPR_CLASSES", None)
+    if known:
+        return known
+    found, stack = {}, [exp.Expression]
+    while stack:
+        cls = stack.pop()
+        found.setdefault(cls.key, cls)
+        stack.extend(cls.__subclasses__())
+    return found
+
+
+def q_dispatch(cls: type) -> dict:
+    """The generator's handlers, built the way sqlglot builds a generator's
+    (TRANSFORMS first, then each <key>_sql method), except that a method
+    inherited from sqlglot's SQL generator never counts: its text is SQL,
+    and q would refuse it or, worse, read it as something else."""
+    table = dict(cls.TRANSFORMS)
+    classes = expression_classes()
+    for name in dir(cls):
+        if not name.endswith("_sql") or name.startswith("_"):
+            continue
+        owner = next(k for k in cls.__mro__ if name in vars(k))
+        if not issubclass(owner, QGenerator):
+            continue
+        node = classes.get(name[:-4])
+        if node is not None and node not in table:
+            table[node] = getattr(cls, name)
+    return table
+
+
+_DISPATCH: dict[type, dict] = {}
+
+
+def monad(word: str, skip_nulls: bool = False):
+    """A TRANSFORMS entry for a one-argument function q spells with a word.
+    skip_nulls when q's word counts a null that SQL's function skips."""
+
+    def handler(self, node):
+        arg = self.operand(node.this)
+        return f"{word} {arg} where not null {arg}" if skip_nulls else f"{word} {arg}"
+
+    return handler
+
+
+def dyad(word: str):
+    """A TRANSFORMS entry for x <word> y."""
+
+    def handler(self, node):
+        return f"{self.operand(node.this)} {word} {self.operand(node.expression)}"
+
+    return handler
+
+
 class QGenerator(Generator):
     """A sqlglot generator whose output is q.
 
-    Extra option, passed through `sqlglot.transpile(..., write="q", ...)`:
+    It follows sqlglot's conventions, so a dialect built on it can extend it
+    the way any sqlglot dialect is extended: a `<key>_sql` method for a node,
+    an entry in TRANSFORMS, or a name in FUNCTIONS for a function sqlglot
+    parses as anonymous (a UDF):
 
-    string_literals: "symbol" (the default) or "string".
+        class MyQ(Q):
+            class Generator(Q.Generator):
+                FUNCTIONS = {**Q.Generator.FUNCTIONS, "VWAP": "wavg"}
+
+    The option string_literals ("symbol", the default, or "string") is a
+    dialect setting, `write="q, string_literals=string"`, or a generator
+    argument, `transpile(..., string_literals="string")`.
     """
 
-    def __init__(self, *args, string_literals: str = "symbol", **kwargs):
+    TRANSFORMS: dict = {}  # filled in below the class, once its methods exist
+
+    # Anonymous SQL functions (names sqlglot does not know) and the q
+    # function each is: f(a) is f a, f(a, b) is f[a;b].
+    FUNCTIONS: dict[str, str] = {}
+
+    def __init__(self, *args, string_literals: str | None = None, **kwargs):
         # A construct with no q translation is an error unless asked otherwise:
         # q text that does something else is worse than no text.
         kwargs.setdefault("unsupported_level", ErrorLevel.RAISE)
         super().__init__(*args, **kwargs)
+        if string_literals is None:
+            string_literals = self.dialect.settings.get("string_literals", "symbol")
         if string_literals not in ("symbol", "string"):
             raise ValueError(
                 f"string_literals must be 'symbol' or 'string', not {string_literals!r}"
             )
         self.symbols = string_literals == "symbol"
         self.depth = 0
+        cls = type(self)
+        if cls not in _DISPATCH:
+            _DISPATCH[cls] = q_dispatch(cls)
+        self._q_dispatch = _DISPATCH[cls]
 
     def preprocess(self, expression: exp.Expr) -> exp.Expr:
         from sqlglot_q.canonical import canonical
@@ -156,10 +242,10 @@ class QGenerator(Generator):
         if key:
             value = expression.args.get(key)
             return self.sql(value) if value else ""
-        handler = getattr(self, f"q_{expression.key}", None)
+        handler = self._q_dispatch.get(type(expression))
         if handler is None:
             return self.refuse(f"{type(expression).__name__} has no q translation")
-        return handler(expression)
+        return handler(self, expression)
 
     def refuse(self, message: str) -> str:
         self.unsupported(message)
@@ -184,33 +270,33 @@ class QGenerator(Generator):
             return self.refuse(f"{text!r} is a q keyword and cannot name a column or table")
         return text
 
-    def q_column(self, node: exp.Column) -> str:
+    def column_sql(self, node: exp.Column) -> str:
         # q columns are unqualified: t.a is a, whichever table it came from.
         return self.name(node.name)
 
-    def q_identifier(self, node: exp.Identifier) -> str:
+    def identifier_sql(self, node: exp.Identifier) -> str:
         return self.name(node.name)
 
-    def q_table(self, node: exp.Table) -> str:
+    def table_sql(self, node: exp.Table) -> str:
         if node.args.get("db") or node.args.get("catalog"):
             return self.refuse(f"{node.sql()}: a qualified table name has no q form")
         return self.name(node.name)
 
-    def q_literal(self, node: exp.Literal) -> str:
+    def literal_sql(self, node: exp.Literal) -> str:
         if node.is_string:
             return self.symbol(node.this) if self.symbols else self.chars(node.this)
         return number(node.this)
 
-    def q_null(self, node: exp.Null) -> str:
+    def null_sql(self, node: exp.Null) -> str:
         return "0N"
 
-    def q_boolean(self, node: exp.Boolean) -> str:
+    def boolean_sql(self, node: exp.Boolean) -> str:
         return "1b" if node.this else "0b"
 
-    def q_paren(self, node: exp.Paren) -> str:
+    def paren_sql(self, node: exp.Paren) -> str:
         return f"({self.sql(node.this)})"
 
-    def q_neg(self, node: exp.Neg) -> str:
+    def neg_sql(self, node: exp.Neg) -> str:
         inner = node.this
         if isinstance(inner, exp.Literal) and not inner.is_string:
             return f"-{number(inner.this)}"
@@ -251,21 +337,21 @@ class QGenerator(Generator):
                 return match if isinstance(node, exp.EQ) else f"not {match}"
         return f"{self.operand(left)}{glyph}{self.operand(right)}"
 
-    q_eq = q_neq = q_gt = q_gte = q_lt = q_lte = binary
-    q_add = q_sub = q_mul = q_div = q_and = q_or = binary
+    eq_sql = neq_sql = gt_sql = gte_sql = lt_sql = lte_sql = binary
+    add_sql = sub_sql = mul_sql = div_sql = and_sql = or_sql = binary
 
-    def q_mod(self, node: exp.Mod) -> str:
+    def mod_sql(self, node: exp.Mod) -> str:
         return f"{self.operand(node.this)} mod {self.operand(node.expression)}"
 
-    def q_not(self, node: exp.Not) -> str:
+    def not_sql(self, node: exp.Not) -> str:
         return f"not {self.sql(node.this)}"
 
-    def q_is(self, node: exp.Is) -> str:
+    def is_sql(self, node: exp.Is) -> str:
         if isinstance(node.expression, exp.Null):
             return f"null {self.sql(node.this)}"
         return self.refuse("IS is only translated for IS NULL and IS NOT NULL")
 
-    def q_in(self, node: exp.In) -> str:
+    def in_sql(self, node: exp.In) -> str:
         subject = self.operand(node.this)
         query = node.args.get("query")
         if query is not None:
@@ -278,17 +364,17 @@ class QGenerator(Generator):
             return f"{subject} in exec x from ({self.sql(inner)})"
         return f"{subject} in {self.vector(node.expressions)}"
 
-    def q_between(self, node: exp.Between) -> str:
+    def between_sql(self, node: exp.Between) -> str:
         bounds = [node.args["low"], node.args["high"]]
         return f"{self.operand(node.this)} within {self.vector(bounds)}"
 
-    def q_like(self, node: exp.Like) -> str:
+    def like_sql(self, node: exp.Like) -> str:
         pattern = node.expression
         if not (isinstance(pattern, exp.Literal) and pattern.is_string):
             return self.refuse("LIKE is only translated with a literal pattern")
         return f"{self.operand(node.this)} like {self.chars(like_pattern(pattern.this))}"
 
-    def q_ilike(self, node: exp.ILike) -> str:
+    def ilike_sql(self, node: exp.ILike) -> str:
         pattern = node.expression
         if not (isinstance(pattern, exp.Literal) and pattern.is_string):
             return self.refuse("ILIKE is only translated with a literal pattern")
@@ -310,7 +396,7 @@ class QGenerator(Generator):
 
     # Functions ------------------------------------------------------------
 
-    def q_count(self, node: exp.Count) -> str:
+    def count_sql(self, node: exp.Count) -> str:
         arg = node.this
         if arg is None or isinstance(arg, exp.Star):
             return "count i"
@@ -330,30 +416,32 @@ class QGenerator(Generator):
             )
         return f"{AGGREGATES[type(node)]} {self.sql(node.this)}"
 
-    q_sum = q_avg = q_min = q_max = aggregate
+    sum_sql = avg_sql = min_sql = max_sql = aggregate
 
     def monadic(self, node: exp.Expr) -> str:
         return f"{MONADIC[type(node)]} {self.sql(node.this)}"
 
-    q_abs = q_upper = q_lower = q_floor = q_ceil = q_sqrt = q_exp = q_ln = q_sign = monadic
+    abs_sql = upper_sql = lower_sql = floor_sql = ceil_sql = sqrt_sql = exp_sql = ln_sql = (
+        sign_sql
+    ) = monadic
 
-    def q_round(self, node: exp.Round) -> str:
+    def round_sql(self, node: exp.Round) -> str:
         places = node.args.get("decimals")
         if places is None:
             return f"{ROUND} {self.operand(node.this)}"
         return f"{ROUND_TO}[{self.sql(node.this)};{self.sql(places)}]"
 
-    def q_pow(self, node: exp.Pow) -> str:
+    def pow_sql(self, node: exp.Pow) -> str:
         return f"{self.operand(node.this)} xexp {self.operand(node.expression)}"
 
-    def q_intdiv(self, node: exp.IntDiv) -> str:
+    def intdiv_sql(self, node: exp.IntDiv) -> str:
         return f"{INT_DIV}[{self.sql(node.this)};{self.sql(node.expression)}]"
 
-    def q_greatest(self, node: exp.Greatest) -> str:
+    def greatest_sql(self, node: exp.Greatest) -> str:
         # | is q's max, and like GREATEST it skips a null: 1|0N is 1.
         return "|".join(self.operand(i) for i in [node.this, *node.expressions])
 
-    def q_least(self, node: exp.Least) -> str:
+    def least_sql(self, node: exp.Least) -> str:
         # & is q's min, but 1&0N is 0N where LEAST skips the null. Filling
         # each side from the other (y^x) fails when a side is a literal atom
         # ('nyi), so the nulls are taken apart with ?[...], which also
@@ -365,7 +453,7 @@ class QGenerator(Generator):
             text = f"?[null {x};{y};?[null {y};{x};{x}&{y}]]"
         return text
 
-    def q_nullif(self, node: exp.Nullif) -> str:
+    def nullif_sql(self, node: exp.Nullif) -> str:
         case = exp.Case(
             ifs=[
                 exp.If(
@@ -375,9 +463,9 @@ class QGenerator(Generator):
             ],
             default=node.this.copy(),
         )
-        return self.q_case(case)
+        return self.case_sql(case)
 
-    def q_filter(self, node: exp.Filter) -> str:
+    def filter_sql(self, node: exp.Filter) -> str:
         agg, cond = node.this, node.expression.this
         where = self.sql(cond)
         if isinstance(agg, exp.Count) and (agg.this is None or isinstance(agg.this, exp.Star)):
@@ -386,7 +474,7 @@ class QGenerator(Generator):
             return f"{AGGREGATES[type(agg)]} {self.operand(agg.this)} where {where}"
         return self.refuse(f"{agg.sql()} FILTER (...) has no q translation here")
 
-    def q_trim(self, node: exp.Trim) -> str:
+    def trim_sql(self, node: exp.Trim) -> str:
         if node.expression is not None or node.args.get("collation"):
             return self.refuse("TRIM of characters other than spaces has no q translation here")
         word = {"LEADING": "ltrim", "TRAILING": "rtrim"}.get(
@@ -395,10 +483,10 @@ class QGenerator(Generator):
         arg = self.operand(node.this)
         return f"`$({word} string {arg})" if self.symbols else f"{word} {arg}"
 
-    def q_concat(self, node: exp.Concat) -> str:
+    def concat_sql(self, node: exp.Concat) -> str:
         return self.joined([node.this, *node.expressions] if node.this else node.expressions)
 
-    def q_dpipe(self, node: exp.DPipe) -> str:
+    def dpipe_sql(self, node: exp.DPipe) -> str:
         text = self.joined(flatten_dpipe(node))
         columns = []
         for part in flatten_dpipe(node):
@@ -445,16 +533,16 @@ class QGenerator(Generator):
             text, atom = f"{left}{glyph}{right}", atom and lit
         return f"`$({text})" if self.symbols else text
 
-    def q_length(self, node: exp.Length) -> str:
+    def length_sql(self, node: exp.Length) -> str:
         arg = self.sql(node.this)
         return f"count each string {arg}" if self.symbols else f"count each {arg}"
 
-    def q_coalesce(self, node: exp.Coalesce) -> str:
+    def coalesce_sql(self, node: exp.Coalesce) -> str:
         # x^y is y with its nulls filled from x, so the first argument goes last.
         items = [node.this, *node.expressions]
         return "^".join(self.operand(i) for i in reversed(items))
 
-    def q_cast(self, node: exp.Cast) -> str:
+    def cast_sql(self, node: exp.Cast) -> str:
         kind = node.to.this
         if is_text(node.this) and kind in TEMPORAL:
             # DATE '2024-01-15' is a literal: q writes it 2024.01.15.
@@ -481,7 +569,7 @@ class QGenerator(Generator):
         literal = spell(text)
         return literal if literal else self.refuse(f"{text!r} is not a {kind.value} q can write")
 
-    def q_interval(self, node: exp.Interval) -> str:
+    def interval_sql(self, node: exp.Interval) -> str:
         from sqlglot_q.temporal import timespan
 
         span = timespan(node)
@@ -491,7 +579,7 @@ class QGenerator(Generator):
             )
         return span
 
-    def q_extract(self, node: exp.Extract) -> str:
+    def extract_sql(self, node: exp.Extract) -> str:
         from sqlglot_q.temporal import PARTS
 
         part = node.name.upper()
@@ -505,9 +593,9 @@ class QGenerator(Generator):
         part = {exp.Year: "YEAR", exp.Month: "MONTH", exp.Day: "DAY"}[type(node)]
         return f"`{PARTS[part]}${self.operand(node.this)}"
 
-    q_year = q_month = q_day = date_part
+    year_sql = month_sql = day_sql = date_part
 
-    def q_datebin(self, node: exp.DateBin) -> str:
+    def datebin_sql(self, node: exp.DateBin) -> str:
         from sqlglot_q.temporal import DAY, nanoseconds
 
         if node.args.get("zone") or len([a for a in node.args.values() if a is not None]) > 2:
@@ -520,7 +608,7 @@ class QGenerator(Generator):
             return self.refuse("TIME_BUCKET is translated for widths that divide a day")
         return f"{self.sql(width)} xbar {self.sql(node.expression)}"
 
-    def q_timestamptrunc(self, node: exp.TimestampTrunc) -> str:
+    def timestamptrunc_sql(self, node: exp.TimestampTrunc) -> str:
         from sqlglot_q.temporal import UNITS, span_text
 
         unit = node.text("unit").upper().rstrip("S")
@@ -528,7 +616,7 @@ class QGenerator(Generator):
             return self.refuse(f"DATE_TRUNC to {unit} has no q xbar")
         return f"{span_text(UNITS[unit])} xbar {self.sql(node.this)}"
 
-    def q_case(self, node: exp.Case) -> str:
+    def case_sql(self, node: exp.Case) -> str:
         default = node.args.get("default")
         branches = [w.args["true"] for w in node.args["ifs"]] + [default]
         known = next((b for b in branches if b is not None and not isinstance(b, exp.Null)), None)
@@ -553,21 +641,28 @@ class QGenerator(Generator):
             text = f"?[{self.sql(cond)};{value(when.args['true'])};{text}]"
         return text
 
-    def q_if(self, node: exp.If) -> str:
+    def if_sql(self, node: exp.If) -> str:
         otherwise = node.args.get("false")
         if otherwise is None:
             return self.refuse("IF without an else value has no q form")
         return f"?[{self.sql(node.this)};{self.sql(node.args['true'])};{self.sql(otherwise)}]"
 
-    def q_qtext(self, node) -> str:
-        # q a window stage computed (windows.py); one token or parenthesised.
-        text = node.this
-        return text if " " not in text else f"({text})"
+    def anonymous_sql(self, node: exp.Anonymous) -> str:
+        word = self.FUNCTIONS.get(node.name.upper())
+        if word is None:
+            return self.refuse(
+                f"{node.name}() is not a function sqlglot knows; map it to q in "
+                "QGenerator.FUNCTIONS"
+            )
+        args = node.expressions
+        if len(args) == 1:
+            return f"{word} {self.operand(args[0])}"
+        return f"{word}[{';'.join(self.sql(a) for a in args)}]"
 
-    def q_alias(self, node: exp.Alias) -> str:
+    def alias_sql(self, node: exp.Alias) -> str:
         return f"{self.name(node.alias)}:{self.sql(node.this)}"
 
-    def q_subquery(self, node: exp.Subquery) -> str:
+    def subquery_sql(self, node: exp.Subquery) -> str:
         # A subquery reached here stands for a value (WHERE a > (SELECT ...)):
         # q's select returns a table, so take its one column's first item.
         # FROM, JOIN and UNION read subqueries as tables, via operand_query.
@@ -581,7 +676,7 @@ class QGenerator(Generator):
 
     # Queries --------------------------------------------------------------
 
-    def q_select(self, node: exp.Select) -> str:
+    def select_sql(self, node: exp.Select) -> str:
         from sqlglot_q.query import select
 
         self.depth += 1
@@ -590,7 +685,7 @@ class QGenerator(Generator):
         finally:
             self.depth -= 1
 
-    def q_union(self, node: exp.Union) -> str:
+    def union_sql(self, node: exp.Union) -> str:
         from sqlglot_q.query import limited, order_terms, output_names, sort
 
         both = f"{self.operand_query(node.this)},{self.operand_query(node.expression)}"
@@ -615,29 +710,44 @@ class QGenerator(Generator):
 
     # Statements -----------------------------------------------------------
 
-    def q_insert(self, node: exp.Insert) -> str:
+    def insert_sql(self, node: exp.Insert) -> str:
+        verb = "insert"
+        conflict = node.args.get("conflict")
+        if (node.args.get("alternative") or "").upper() == "REPLACE":
+            verb = "upsert"  # INSERT OR REPLACE: a row with the key replaces
+        elif conflict is not None:
+            if not replaces_all(conflict):
+                return self.refuse(
+                    "ON CONFLICT is translated as DO UPDATE SET c = EXCLUDED.c for every "
+                    "column set, which is q's upsert; DO NOTHING keeps the old row and has "
+                    "no q form here"
+                )
+            verb = "upsert"
+        return self.inserted(node, verb)
+
+    def inserted(self, node: exp.Insert, verb: str) -> str:
         target = node.this
         columns = []
         if isinstance(target, exp.Schema):
             columns = [self.name(c) for c in target.expressions]
             target = target.this
-        table = f"`{self.q_table(target)}"
+        table = f"`{self.table_sql(target)}"
         source = node.expression
         if isinstance(source, exp.Values):
             rows = [r.expressions for r in source.expressions]
             if columns:
                 cells = [self.vector([row[i] for row in rows]) for i in range(len(columns))]
                 body = ";".join(f"{c}:{v}" for c, v in zip(columns, cells, strict=True))
-                return f"{table} insert ([] {body})"
+                return f"{table} {verb} ([] {body})"
             if len(rows) == 1:
-                return f"{table} insert ({';'.join(self.sql(v) for v in rows[0])})"
+                return f"{table} {verb} ({';'.join(self.sql(v) for v in rows[0])})"
             cols = [self.vector([row[i] for row in rows]) for i in range(len(rows[0]))]
-            return f"{table} insert ({';'.join(cols)})"
+            return f"{table} {verb} ({';'.join(cols)})"
         if columns:
             return self.refuse("INSERT INTO t (cols) SELECT ... is not translated")
-        return f"{table} insert {self.operand_query(source)}"
+        return f"{table} {verb} {self.operand_query(source)}"
 
-    def q_update(self, node: exp.Update) -> str:
+    def update_sql(self, node: exp.Update) -> str:
         where = self.where(node.args.get("where"))
         sets = []
         for e in node.expressions:
@@ -648,21 +758,31 @@ class QGenerator(Generator):
                 value = f"(type {col})${self.operand_text(e.expression, value)}"
             sets.append(f"{col}:{value}")
         sets = ",".join(sets)
-        return f"update {sets} from `{self.q_table(node.this)}{where}"
+        return f"update {sets} from `{self.table_sql(node.this)}{where}"
 
-    def q_delete(self, node: exp.Delete) -> str:
-        return f"delete from `{self.q_table(node.this)}{self.where(node.args.get('where'))}"
+    def delete_sql(self, node: exp.Delete) -> str:
+        return f"delete from `{self.table_sql(node.this)}{self.where(node.args.get('where'))}"
 
-    def q_create(self, node: exp.Create) -> str:
+    def create_sql(self, node: exp.Create) -> str:
         schema = node.this
         query = node.expression
         if node.args.get("kind") == "TABLE" and isinstance(schema, exp.Table) and query:
             # CREATE TABLE t AS SELECT ...: q names the result.
-            return f"{self.q_table(schema)}:{self.sql(query)}"
+            return f"{self.table_sql(schema)}:{self.sql(query)}"
         if node.args.get("kind") != "TABLE" or not isinstance(schema, exp.Schema):
             return self.refuse("CREATE is only translated for CREATE TABLE with columns")
-        cols = []
+        cols, keys = [], []
         for col in schema.expressions:
+            if isinstance(col, exp.PrimaryKey):
+                keys += [c.name for c in col.expressions]
+                continue
+            if not isinstance(col, exp.ColumnDef):
+                return self.refuse(f"{col.sql()} in CREATE TABLE has no q form")
+            if any(
+                isinstance(c.args.get("kind"), exp.PrimaryKeyColumnConstraint)
+                for c in col.args.get("constraints") or []
+            ):
+                keys.append(col.name)
             kind = col.args["kind"].this
             if kind in TEXT:
                 empty = "`symbol$()" if self.symbols else "()"
@@ -670,14 +790,61 @@ class QGenerator(Generator):
                 empty = TYPES[kind][1]
             else:
                 return self.refuse(f"column type {col.args['kind'].sql()} has no q type here")
-            cols.append(f"{self.name(col.name)}:{empty}")
-        return f"{self.q_table(schema.this)}:([] {';'.join(cols)})"
+            cols.append((col.name, f"{self.name(col.name)}:{empty}"))
+        # A primary key makes a keyed table: ([k:...] v:...), whose upsert
+        # replaces the row with the same key.
+        keyed = [text for name, text in cols if name in keys]
+        rest = [text for name, text in cols if name not in keys]
+        if set(keys) - {name for name, _ in cols}:
+            return self.refuse("PRIMARY KEY names a column the table does not have")
+        if keys and [n for n, _ in cols][: len(keys)] != [k for k in keys]:
+            return self.refuse("a keyed q table has its key columns first")
+        return f"{self.table_sql(schema.this)}:([{';'.join(keyed)}] {';'.join(rest)})"
 
-    def q_drop(self, node: exp.Drop) -> str:
+    def truncatetable_sql(self, node: exp.TruncateTable) -> str:
+        tables = node.expressions
+        if len(tables) != 1:
+            return self.refuse("TRUNCATE of several tables is several q statements")
+        return f"delete from `{self.table_sql(tables[0])}"
+
+    def log_sql(self, node: exp.Log) -> str:
+        if node.expression is None:
+            # LOG(x) is base 10 in DuckDB and Postgres and e elsewhere; which
+            # one the SQL meant is gone by the time it reaches here.
+            return self.refuse("LOG(x) means log10 or ln by dialect: write LOG10(x) or LN(x)")
+        return f"{self.operand(node.this)} xlog {self.operand(node.expression)}"
+
+    def startswith_sql(self, node) -> str:
+        return self.matches(node, "{}*")
+
+    def endswith_sql(self, node) -> str:
+        return self.matches(node, "*{}")
+
+    def contains_sql(self, node) -> str:
+        return self.matches(node, "*{}*")
+
+    def matches(self, node, shape: str) -> str:
+        text = node.expression
+        if not (isinstance(text, exp.Literal) and text.is_string):
+            return self.refuse(f"{node.sql()}: the text to find must be a literal")
+        escaped = "".join(f"[{c}]" if c in "*?[]" else c for c in text.this)
+        return f"{self.operand(node.this)} like {self.chars(shape.format(escaped))}"
+
+    def left_sql(self, node) -> str:
+        return self.ends(node, LEFT)
+
+    def right_sql(self, node) -> str:
+        return self.ends(node, RIGHT)
+
+    def ends(self, node, lambdas) -> str:
+        fn = lambdas[0] if self.symbols else lambdas[1]
+        return f"{fn}[{self.sql(node.expression)};{self.sql(node.this)}]"
+
+    def drop_sql(self, node: exp.Drop) -> str:
         if node.args.get("kind") != "TABLE":
             return self.refuse("DROP is only translated for DROP TABLE")
         tables = node.args.get("tables") or [node.this]
-        return f"delete {','.join(self.q_table(t) for t in tables)} from `."
+        return f"delete {','.join(self.table_sql(t) for t in tables)} from `."
 
     def where(self, node: exp.Where | None) -> str:
         if node is None:
@@ -765,3 +932,67 @@ def like_pattern(sql: str) -> str:
         else:
             out.append(ch)
     return "".join(out)
+
+
+def qtext(self, node) -> str:
+    # q a window stage computed (windows.py); one token or parenthesised.
+    text = node.this
+    return text if " " not in text else f"({text})"
+
+
+def _select_rewrites():
+    from sqlglot import transforms
+
+    from sqlglot_q.rewrites import expand_group_by_all, q_names
+
+    # sqlglot's own rewrites, as its dialects use them: QUALIFY and DISTINCT
+    # ON become a window in a subquery, which the window stages translate.
+    return transforms.preprocess(
+        [
+            transforms.eliminate_qualify,
+            transforms.eliminate_distinct_on,
+            expand_group_by_all,
+            q_names,
+        ]
+    )
+
+
+QGenerator.TRANSFORMS = {
+    QText: qtext,
+    exp.Select: _select_rewrites(),
+    # Statistics. q's med counts a null as the smallest value; SQL's MEDIAN
+    # skips it. sdev, dev, svar and var skip nulls as SQL does.
+    exp.Median: monad("med", skip_nulls=True),
+    exp.Stddev: monad("sdev"),
+    exp.StddevSamp: monad("sdev"),
+    exp.StddevPop: monad("dev"),
+    exp.Variance: monad("svar"),
+    exp.VariancePop: monad("var"),
+    exp.Corr: dyad("cor"),
+    exp.CovarPop: dyad("cov"),
+    exp.CovarSamp: dyad("scov"),
+    exp.CountIf: monad("sum"),
+    exp.AnyValue: monad("first", skip_nulls=True),
+    # DuckDB parses ANY_VALUE(x) as IGNORE NULLS around it: first skips them.
+    exp.IgnoreNulls: lambda self, node: (
+        self.sql(node.this)
+        if isinstance(node.this, exp.AnyValue)
+        else self.refuse("IGNORE NULLS is translated for ANY_VALUE only")
+    ),
+}
+
+
+def replaces_all(conflict: exp.OnConflict) -> bool:
+    """ON CONFLICT DO UPDATE SET c = EXCLUDED.c, ...: the new row replaces
+    the old, which is q's upsert on a keyed table."""
+    action = conflict.args.get("action")
+    if action is None or action.name.upper() != "DO UPDATE":
+        return False
+    sets = conflict.expressions
+    return bool(sets) and all(
+        isinstance(e, exp.EQ)
+        and isinstance(e.expression, exp.Column)
+        and e.expression.table.upper() == "EXCLUDED"
+        and e.expression.name == e.this.name
+        for e in sets
+    )

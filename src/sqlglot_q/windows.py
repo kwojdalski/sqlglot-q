@@ -46,6 +46,8 @@ def chain(gen: QGenerator, items: list[exp.Expr], source: str) -> tuple[list[exp
     whole expression computed per group: SUM(px*qty) OVER w / SUM(qty) OVER w
     is update vwap:(sums px*qty)%sums qty by ... Windows that differ get a
     stage each, w0, w1, and the item refers to them."""
+    from sqlglot_q.generator import QText
+
     items = [i.copy() for i in items]
     text = source
     made = 0
@@ -87,12 +89,6 @@ def chain(gen: QGenerator, items: list[exp.Expr], source: str) -> tuple[list[exp
         gen.refuse(str(e))
         return None
     return items, text
-
-
-class QText(exp.Expression):
-    """q text standing in a tree the generator prints (generator.q_qtext)."""
-
-    arg_types = {"this": True}
 
 
 def keys(gen: QGenerator, nodes: list[exp.Expr], what: str) -> list[str]:

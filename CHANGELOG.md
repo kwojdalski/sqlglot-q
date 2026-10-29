@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+Aligned with sqlglot's dialect conventions:
+
+- `string_literals` is a dialect setting: `write="q, string_literals=string"`.
+- `Q` declares `NORMALIZATION_STRATEGY` (case sensitive) and `NULL_ORDERING`.
+- Generator handlers are `<key>_sql` methods and a `TRANSFORMS` table, as in
+  any sqlglot generator, so a subclass extends them; `FUNCTIONS` maps
+  functions sqlglot does not know (UDFs) to q, both ways.
+- sqlglot's own rewrites run through `transforms.preprocess`.
+
+Added, both directions:
+
+- `QUALIFY` and `DISTINCT ON` (sqlglot's `eliminate_qualify` and
+  `eliminate_distinct_on`), and `GROUP BY ALL`.
+- `MEDIAN` (skipping nulls, which q's `med` does not), `STDDEV`,
+  `STDDEV_POP`, `VARIANCE`, `VAR_POP`, `CORR`, `COVAR_POP`, `COVAR_SAMP`,
+  `COUNT_IF`, `ANY_VALUE`.
+- `LOG(b, x)`, `LOG10`, `LOG2`; `STARTS_WITH`, `ENDS_WITH`, `CONTAINS`,
+  `LEFT`, `RIGHT`.
+- Keyed tables: `PRIMARY KEY` columns are a keyed table; `INSERT OR REPLACE`
+  and `ON CONFLICT DO UPDATE SET c = EXCLUDED.c` are `upsert`; `TRUNCATE`.
+
 Fixed, each found by running q against DuckDB:
 
 - `ORDER BY` ignored where SQL puts nulls: DuckDB sorts them last, q first,

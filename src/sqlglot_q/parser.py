@@ -22,7 +22,17 @@ from sqlglot import exp
 from sqlglot.errors import ParseError
 
 from sqlglot_q.canonical import canonical
-from sqlglot_q.generator import HALF_EVEN, INT_DIV, NAME, RESERVED, ROUND, ROUND_TO, TYPES
+from sqlglot_q.generator import (
+    HALF_EVEN,
+    INT_DIV,
+    LEFT,
+    NAME,
+    RESERVED,
+    RIGHT,
+    ROUND,
+    ROUND_TO,
+    TYPES,
+)
 from sqlglot_q.temporal import CASTS as PART_CASTS
 from sqlglot_q.temporal import interval, span_nanoseconds
 
@@ -75,12 +85,24 @@ KEYWORD_DYADS = {
     "cross",
     "xcol",
     "insert",
+    "upsert",
     "xbar",
     "xexp",
+    "xlog",
+    "cor",
+    "cov",
+    "scov",
     *WINDOW_DYADS,
 }
+STATISTICS = {
+    "sdev": exp.Stddev,
+    "dev": exp.StddevPop,
+    "svar": exp.Variance,
+    "var": exp.VariancePop,
+}
 MONADS = (
-    {"signum", "trim", "ltrim", "rtrim"}
+    {"signum", "trim", "ltrim", "rtrim", "med"}
+    | set(STATISTICS)
     | WINDOW_MONADS
     | {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
     | set(AGGREGATES)
@@ -200,18 +222,25 @@ def split_statements(text: str) -> list[str]:
 class QParser:
     """Parses q text into sqlglot expressions, one per statement."""
 
-    def __init__(self, **opts):
+    def __init__(self, dialect=None, **opts):
         self.opts = opts
+        generator = getattr(dialect, "generator_class", None)
+        # The dialect's FUNCTIONS, read backwards: wavg[a;b] is VWAP(a, b)
+        # when the dialect maps VWAP to wavg.
+        self.functions = {q: sql for sql, q in getattr(generator, "FUNCTIONS", {}).items()}
 
     def parse(self, text: str) -> list[exp.Expr]:
-        return [Statement(tokenize(s), s).statement() for s in split_statements(text)]
+        return [
+            Statement(tokenize(s), s, self.functions).statement() for s in split_statements(text)
+        ]
 
 
 class Statement:
-    def __init__(self, tokens: list[Token], text: str):
+    def __init__(self, tokens: list[Token], text: str, functions: dict | None = None):
         self.t = tokens
         self.i = 0
         self.text = text
+        self.functions = functions or {}
 
     # Token stream -----------------------------------------------------------
 
@@ -276,9 +305,16 @@ class Statement:
         self.i += 2
         self.expect("(")
         self.expect("[")
-        self.expect("]")
-        cols = []
-        while not self.is_(")"):
+        cols, keys = [], []
+        closing = "]"
+        while True:
+            if self.is_(closing):
+                self.next()
+                if closing == ")":
+                    break
+                keys = [c.name for c in cols]
+                closing = ")"
+                continue
             col = self.next().text
             self.expect(":")
             cast = self.next()
@@ -293,7 +329,9 @@ class Statement:
             cols.append(exp.ColumnDef(this=exp.to_identifier(col), kind=exp.DataType(this=kind)))
             if self.is_(";"):
                 self.next()
-        self.expect(")")
+        if keys:
+            # ([k:...] v:...) is keyed on k: SQL's PRIMARY KEY.
+            cols.append(exp.PrimaryKey(expressions=[exp.to_identifier(k) for k in keys]))
         schema = exp.Schema(this=exp.to_table(name), expressions=cols)
         return exp.Create(this=schema, kind="TABLE")
 
@@ -370,6 +408,18 @@ class Statement:
             return self.equijoin()
         if word == "aj" and self.is_("["):
             return self.asof_join()
+        if word in self.functions:
+            name = self.functions[word]
+            if self.is_("["):
+                self.next()
+                args = [self.expr(set())]
+                while self.is_(";"):
+                    self.next()
+                    args.append(self.expr(set()))
+                self.expect("]")
+            else:
+                args = [self.expr(stop)]
+            return exp.Anonymous(this=name, expressions=args)
         if word in MONADS and (self.starts_term() or self.peek_query()):
             return self.monad(word, self.expr(stop))
         if word in MONADS | KEYWORD_DYADS | QUERY_WORDS:
@@ -397,6 +447,13 @@ class Statement:
             return exp.Neg(this=arg)
         if word == "string":
             return exp.Cast(this=arg, to=exp.DataType.build("VARCHAR"))
+        if word == "sum" and boolean(arg):
+            return exp.CountIf(this=bare(arg))  # sum c counts the rows where c holds
+        if word in STATISTICS:
+            return STATISTICS[word](this=arg)
+        if word in ("med", "first") and non_null(arg):
+            # med x where not null x: q's med counts nulls, MEDIAN skips them
+            return (exp.Median if word == "med" else exp.AnyValue)(this=arg.this)
         if word in AGGREGATES:
             if isinstance(arg, Index) and isinstance(arg.expression, Where_):
                 # sum x where c: SUM(x) FILTER (WHERE c)
@@ -483,6 +540,14 @@ class Statement:
             # A lambda applies to all of the expression on its right.
             target = self.expr(stop)
             return null_order(self, target, nulls[2], first=nulls[1] == "idesc")
+        if text in (*LEFT, *RIGHT):
+            self.expect("[")
+            n = self.expr(set())
+            self.expect(";")
+            target = self.expr(set())
+            self.expect("]")
+            node = exp.Left if text in LEFT else exp.Right
+            return node(this=target, expression=n)
         if text in (ROUND, ROUND_TO, INT_DIV):
             if text == ROUND:
                 return exp.Round(this=self.expr(stop))
@@ -608,6 +673,15 @@ class Statement:
             return Joins(expressions=parts)
         if op == "xexp":
             return exp.Pow(this=left, expression=right)
+        if op == "xlog":
+            return exp.Log(this=left, expression=right)
+        if op in ("cor", "cov", "scov"):
+            node = {"cor": exp.Corr, "cov": exp.CovarPop, "scov": exp.CovarSamp}[op]
+            return node(this=left, expression=right)
+        if op == "upsert":
+            node = inserted(self, left, right)
+            node.set("alternative", "REPLACE")  # INSERT OR REPLACE
+            return node
         if op == "$" and isinstance(left, exp.Paren) and isinstance(left.this, Index):
             fn = left.this.this
             if isinstance(fn, exp.Column) and fn.name == "type":

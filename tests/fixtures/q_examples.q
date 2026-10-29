@@ -96,3 +96,9 @@ select n:count i where qty>50, v:sum qty where px>1.5 by sym from trades
 select from {x iasc null x`px} `px xasc trades
 select ex:`$((string sym),\:"-x") from trades
 delete day from select from trades where qty>10
+
+/ hand-written: statistics, logs, keyed tables
+select m:med px where not null px, sd:sdev px, r:px cor qty by sym from trades
+select l:2 xlog qty from trades
+k:([id:`long$()] v:`float$())
+`k upsert (1;2.5)

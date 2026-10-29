@@ -54,7 +54,8 @@ both right.
 | `src/sqlglot_q/windows.py`, `windows_read.py` | window functions as `update ... by` stages, and back |
 | `src/sqlglot_q/temporal.py` | dates, times, timestamps and intervals between the two spellings |
 | `src/sqlglot_q/canonical.py` | one parenthesisation of a tree, applied by both directions so round trips settle |
-| `src/sqlglot_q/generator.py` | `QGenerator`: one `q_<node>` method per sqlglot node; anything else is refused |
+| `src/sqlglot_q/generator.py` | `QGenerator`: sqlglot's conventions (`<key>_sql` methods, `TRANSFORMS`, `FUNCTIONS`), dispatching only to handlers defined for q; anything else is refused |
+| `src/sqlglot_q/rewrites.py` | tree rewrites in the shape of `sqlglot.transforms`, chained with sqlglot's own by `transforms.preprocess` |
 | `src/sqlglot_q/query.py` | SELECT, which in q is several expressions composed (group, having, sort, limit) |
 | `src/sqlglot_q/reserved.json` | q's reserved names, which can't name a column (shared with q-lint) |
 | `src/sqlglot_q/cli.py` | the `sqlglot-q` command |

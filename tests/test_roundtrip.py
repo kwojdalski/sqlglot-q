@@ -29,6 +29,9 @@ from tests.integration.harness import q_binary, run_duckdb, run_q, same
 from tests.integration.test_functions import DATA as FUNCTIONED
 from tests.integration.test_functions import QUERIES as FUNCTIONS
 from tests.integration.test_queries import QUERIES, STATEMENTS, TABLES
+from tests.integration.test_sqlglot_native import DATA as NATIVE_DATA
+from tests.integration.test_sqlglot_native import QUERIES as NATIVE
+from tests.integration.test_sqlglot_native import SCRIPTS
 from tests.integration.test_temporal import QUERIES as TEMPORAL
 from tests.integration.test_temporal import TICKS
 from tests.integration.test_windows import DATA as WINDOWED
@@ -66,6 +69,8 @@ SQL = (
     + [sql for sql, _ in TEMPORAL]
     + WINDOWS
     + [sql for sql, _ in FUNCTIONS]
+    + [sql for sql, _ in NATIVE]
+    + [sql for script in SCRIPTS for sql in script]
 )
 Q_EXAMPLES = statements(FIXTURES / "q_examples.q")
 Q_REFUSED = statements(FIXTURES / "q_refused.q")
@@ -85,6 +90,7 @@ SELECTS = [(sql, ordered) for sql, ordered in QUERIES if sql.startswith(("SELECT
 SELECTS += TEMPORAL
 SELECTS += [(sql, "LIMIT" in sql) for sql in WINDOWS]
 SELECTS += FUNCTIONS
+SELECTS += NATIVE
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
@@ -97,6 +103,8 @@ def test_sql_read_back_from_q_means_the_same(sql, ordered):
         if sql in WINDOWS
         else FUNCTIONED
         if (sql, ordered) in FUNCTIONS
+        else NATIVE_DATA
+        if (sql, ordered) in NATIVE
         else TABLES
     )
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back
@@ -168,3 +176,17 @@ def test_conversions_are_deterministic():
     assert len(runs) == 1
     # And within one process, the same call twice.
     assert [to_q(s) for s in SQL] == [to_q(s) for s in SQL]
+
+
+def test_a_dialects_own_functions_round_trip():
+    # A subclass's FUNCTIONS are read back as well as written.
+    from sqlglot_q import Q
+
+    class MyQ(Q):
+        class Generator(Q.Generator):
+            FUNCTIONS = {**Q.Generator.FUNCTIONS, "VWAP": "wavg"}
+
+    sql = "SELECT VWAP(qty, px) AS w FROM t"
+    q = sqlglot.transpile(sql, write=MyQ)[0]
+    assert q == "select w:wavg[qty;px] from t"
+    assert sqlglot.parse_one(q, read=MyQ).sql() == sql
