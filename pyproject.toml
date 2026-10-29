@@ -1,0 +1,60 @@
+[project]
+name = "sqlglot-q"
+version = "0.1.0"
+description = "SQL to q/kdb+: a sqlglot dialect plugin that writes qSQL"
+readme = "README.md"
+authors = [
+    { name = "Krzysztof Wojdalski", email = "krzysztof.wojdalski@gmail.com" }
+]
+requires-python = ">=3.11"
+license = "MIT"
+keywords = ["sqlglot", "kdb", "q", "sql", "transpiler"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: SQL",
+    "Topic :: Database",
+]
+dependencies = [
+    "sqlglot>=30",
+]
+
+[project.urls]
+Repository = "https://github.com/kwojdalski/sqlglot-q"
+
+[project.scripts]
+sqlglot-q = "sqlglot_q.cli:main"
+
+# sqlglot looks dialects up in this group, so write="q" works once installed.
+[project.entry-points."sqlglot.dialects"]
+q = "sqlglot_q.dialect:Q"
+kdb = "sqlglot_q.dialect:Q"
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    # The oracle the integration tests check q against.
+    "duckdb>=1.1",
+    "pre-commit>=4.7.0",
+    "pytest>=9.2.0",
+    "ruff>=0.17.3",
+]
+orbital = [
+    "orbital>=0.6.0",
+    "pandas>=3.1.0",
+    "scikit-learn>=1.9.1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,136 @@
+"""Run q, and the same data through DuckDB, so a translation is judged by
+what q returns rather than by what its text looks like.
+
+q is run on a script file, never on stdin (it waits for more input there),
+and from a fresh directory, because q loads a q.q from the directory it
+starts in.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+Rows = list[tuple]
+
+
+def q_binary() -> str | None:
+    return shutil.which("q")
+
+
+def q_column(values: list) -> str:
+    """A Python column as a q list literal of one type."""
+    present = [v for v in values if v is not None]
+    if all(isinstance(v, bool) for v in present):
+        return "".join("1" if v else "0" for v in values) + "b" if values else "`boolean$()"
+    if all(isinstance(v, int) for v in present):
+        return " ".join("0N" if v is None else str(v) for v in values)
+    if all(isinstance(v, (int, float)) for v in present):
+        return (
+            "`float$" + "(" + ";".join("0n" if v is None else repr(float(v)) for v in values) + ")"
+        )
+    if all(isinstance(v, str) for v in present):
+        # (),"x" keeps a one-character string a string, not a char atom.
+        cells = ['(),""' if v is None else "()," + json.dumps(v) for v in values]
+        return "`$(" + ";".join(cells) + ")"
+    raise TypeError(f"no q column for {values!r}")
+
+
+def q_table(columns: dict[str, list]) -> str:
+    body = ";".join(f"{name}:{q_column(values)}" for name, values in columns.items())
+    return f"([] {body})"
+
+
+def q_string(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
+def run_q(tables: dict[str, dict[str, list]], queries: list[str]) -> list[Rows | str]:
+    """Evaluate each query on fresh copies of the tables; a result is its rows,
+    or the error q signalled, as a string."""
+    binary = q_binary()
+    assert binary, "q is not on PATH"
+    setup = "".join(f"{name}:{q_table(cols)};\n" for name, cols in tables.items())
+    lines = [
+        'system "P 0";',
+        "run:{[setup;q] value setup; r:value q;",
+        "  $[98h=type r; r; 99h=type r; 0!r; ([] x:enlist r)]};",
+        "show_:{-1 .j.j `ok`rows!(1b; flip value flip x)};",
+        "fail:{-1 .j.j `ok`error!(0b; x)};",
+    ]
+    for q in queries:
+        lines.append(f"@[{{show_ run[x;y]}}[{q_string(setup)}];{q_string(q)};fail];")
+    lines.append("exit 0;")
+    with tempfile.TemporaryDirectory() as tmp:
+        script = Path(tmp) / "run.q"
+        script.write_text("\n".join(lines) + "\n")
+        out = subprocess.run(
+            [binary, str(script), "-q"], cwd=tmp, capture_output=True, text=True, timeout=60
+        )
+    results: list[Rows | str] = []
+    for line in out.stdout.splitlines():
+        answer = json.loads(line)
+        if answer["ok"]:
+            results.append([tuple(row) for row in answer["rows"]])
+        else:
+            results.append(f"'{answer['error']}")
+    assert len(results) == len(queries), out.stderr or out.stdout
+    return results
+
+
+def duckdb_connection(tables: dict[str, dict[str, list]]):
+    """An in-memory DuckDB holding the same tables q gets."""
+    import duckdb
+
+    con = duckdb.connect()
+    for name, cols in tables.items():
+        decl = ", ".join(f"{n} {duck_type(v)}" for n, v in cols.items())
+        con.execute(f"CREATE TABLE {name} ({decl})")
+        rows = list(zip(*cols.values(), strict=True))
+        if rows:
+            con.executemany(f"INSERT INTO {name} VALUES ({', '.join('?' for _ in cols)})", rows)
+    return con
+
+
+def run_duckdb(tables: dict[str, dict[str, list]], sql: str) -> Rows:
+    return [tuple(r) for r in duckdb_connection(tables).execute(sql).fetchall()]
+
+
+def duck_type(values: list) -> str:
+    present = [v for v in values if v is not None]
+    if all(isinstance(v, bool) for v in present):
+        return "BOOLEAN"
+    if all(isinstance(v, int) for v in present):
+        return "BIGINT"
+    if all(isinstance(v, (int, float)) for v in present):
+        return "DOUBLE"
+    return "VARCHAR"
+
+
+def normal(rows: Rows) -> Rows:
+    """Rows with q's nulls as None and floats rounded, so the two engines'
+    answers compare."""
+
+    def cell(v):
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, (int, float)):
+            # q's count is an int where DuckDB's is a bigint, and its avg of
+            # longs a float: compare values, not types.
+            return None if math.isnan(v) else round(float(v), 9)
+        if v == "":
+            return None
+        return v
+
+    return [tuple(cell(v) for v in row) for row in rows]
+
+
+def same(a: Rows, b: Rows, ordered: bool) -> bool:
+    a, b = normal(a), normal(b)
+    if not ordered:
+        a, b = sorted(a, key=repr), sorted(b, key=repr)
+    return a == b

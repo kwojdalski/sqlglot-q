@@ -1,0 +1,48 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    # q is not on the runners, so tests/integration skips itself here; run it
+    # locally before a release (CLAUDE.md).
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+
+  sqlglot-compat:
+    # The supported range in pyproject.toml; `latest` is unpinned so a new
+    # sqlglot release surfaces here before it surfaces as a user's bug.
+    name: sqlglot ${{ matrix.sqlglot-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sqlglot-version: ["30.0.0", "latest"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - if: matrix.sqlglot-version != 'latest'
+        run: uv pip install "sqlglot==${{ matrix.sqlglot-version }}"
+      - if: matrix.sqlglot-version == 'latest'
+        run: uv pip install --upgrade sqlglot
+      - run: uv run --no-sync pytest

@@ -1,0 +1,202 @@
+"""The q text each construct becomes, in the Validator style sqlglot's own
+dialect tests (and its plugins') use. These pin the text; whether the text
+does what the SQL does is tests/integration's question."""
+
+from __future__ import annotations
+
+import unittest
+
+import pytest
+import sqlglot
+from sqlglot import ErrorLevel
+from sqlglot.errors import UnsupportedError
+
+from sqlglot_q import Q
+
+
+class Validator(unittest.TestCase):
+    dialect = "q"
+
+    def validate(self, sql: str, q: str, read: str | None = None, **opts) -> None:
+        self.assertEqual(sqlglot.transpile(sql, read=read, write=self.dialect, **opts)[0], q)
+
+    def refuses(self, sql: str, message: str) -> None:
+        with pytest.raises(UnsupportedError, match=message):
+            sqlglot.transpile(sql, write=self.dialect)
+
+
+class TestRegistration(Validator):
+    def test_entry_points(self):
+        # Both names come from the package's entry points, not from an import.
+        for name in ("q", "kdb"):
+            self.assertIs(sqlglot.Dialect.get_or_raise(name).__class__, Q)
+
+    def test_reading_q_is_refused(self):
+        with pytest.raises(NotImplementedError):
+            sqlglot.parse_one("select from t", read="q")
+
+
+class TestSelect(Validator):
+    def test_projection(self):
+        self.validate("SELECT * FROM t", "select from t")
+        self.validate("SELECT a, b AS c FROM t", "select a, c:b from t")
+        self.validate("SELECT t.a FROM t", "select a from t")
+        self.validate("SELECT DISTINCT b FROM t", "select distinct b from t")
+
+    def test_where_splits_top_level_and(self):
+        self.validate("SELECT a FROM t WHERE a > 1 AND b = 2", "select a from t where a>1, b=2")
+        self.validate(
+            "SELECT a FROM t WHERE a > 1 AND (b = 2 OR c = 3)",
+            "select a from t where a>1, (b=2)|(c=3)",
+        )
+
+    def test_operands_are_parenthesised(self):
+        # q has no precedence: a*b+c would be a*(b+c).
+        self.validate("SELECT a * b + c FROM t", "select (a*b)+c from t")
+        self.validate("SELECT a - (b - c) FROM t", "select a-(b-c) from t")
+        self.validate("SELECT a / b FROM t", "select a%b from t")
+        self.validate("SELECT a % b FROM t", "select a mod b from t")
+
+    def test_literals(self):
+        self.validate("SELECT 'abc', 'a b', '' FROM t", 'select `abc, `$("a b"), ` from t')
+        self.validate("SELECT 'abc' FROM t", 'select "abc" from t', string_literals="string")
+        self.validate("SELECT 'a' FROM t", 'select enlist "a" from t', string_literals="string")
+        self.validate("SELECT TRUE, FALSE, NULL FROM t", "select 1b, 0b, 0N from t")
+        # q refuses 1E3 and 1.5E+3; it reads 1000f and 1500.0.
+        self.validate("SELECT 1E3, 1.5E+3, 0.5E0 FROM t", "select 1000.0, 1500.0, 0.5 from t")
+        self.validate("SELECT -1.5 FROM t", "select -1.5 from t")
+
+    def test_string_equality_in_string_mode(self):
+        self.validate(
+            "SELECT a FROM t WHERE b = 'xy'",
+            'select a from t where b~\\:"xy"',
+            string_literals="string",
+        )
+
+    def test_predicates(self):
+        self.validate("SELECT a FROM t WHERE b IN ('x', 'y')", "select a from t where b in `x`y")
+        self.validate("SELECT a FROM t WHERE a IN (1, 2)", "select a from t where a in 1 2")
+        self.validate("SELECT a FROM t WHERE a IN (1)", "select a from t where a in enlist 1")
+        self.validate(
+            "SELECT a FROM t WHERE a BETWEEN 1 AND 3", "select a from t where a within 1 3"
+        )
+        self.validate("SELECT a FROM t WHERE d IS NULL", "select a from t where null d")
+        self.validate("SELECT a FROM t WHERE d IS NOT NULL", "select a from t where not null d")
+        self.validate(
+            "SELECT a FROM t WHERE b LIKE 'a%_*'", 'select a from t where b like "a*?[*]"'
+        )
+
+    def test_aggregates(self):
+        self.validate("SELECT COUNT(*) FROM t", "select count i from t")
+        self.validate("SELECT COUNT(d) FROM t", "select count d where not null d from t")
+        self.validate(
+            "SELECT COUNT(DISTINCT d) FROM t",
+            "select count distinct d where not null d from t",
+        )
+        self.validate("SELECT SUM(a), AVG(b) FROM t", "select sum a, avg b from t")
+
+    def test_group_by(self):
+        self.validate("SELECT b, SUM(a) FROM t GROUP BY b", "0!select sum a by b from t")
+        self.validate(
+            "SELECT SUM(a) AS s, b FROM t GROUP BY b",
+            "select s, b from (0!select s:sum a by b from t)",
+        )
+        self.validate(
+            "SELECT b, COUNT(*) AS n FROM t GROUP BY b HAVING COUNT(*) > 1",
+            "select from (0!select n:count i by b from t) where n>1",
+        )
+        self.validate(
+            "SELECT b FROM t GROUP BY b HAVING SUM(a) > 6",
+            "select b from (0!select h0:sum a by b from t) where h0>6",
+        )
+
+    def test_order_and_limit(self):
+        self.validate("SELECT a FROM t ORDER BY a DESC", "`a xdesc (select a from t)")
+        self.validate(
+            "SELECT a, b FROM t ORDER BY b, a DESC", "`b xasc (`a xdesc (select a, b from t))"
+        )
+        self.validate("SELECT a FROM t ORDER BY c", "select a from (`c xasc t)")
+        self.validate("SELECT a FROM t LIMIT 2", "2 sublist (select a from t)")
+        self.validate("SELECT a FROM t LIMIT 2 OFFSET 3", "(3;2) sublist (select a from t)")
+
+    def test_joins(self):
+        self.validate("SELECT * FROM t JOIN u ON t.k = u.k", "select from ej[`k;t;u]")
+        self.validate("SELECT * FROM t JOIN u USING (k, j)", "select from ej[`k`j;t;u]")
+        self.validate("SELECT * FROM t LEFT JOIN u ON t.k = u.k", "select from t lj `k xkey u")
+        self.validate("SELECT * FROM t CROSS JOIN u", "select from t cross u")
+
+    def test_ctes_are_inlined(self):
+        self.validate(
+            "WITH w AS (SELECT a FROM t) SELECT a FROM w",
+            "select a from (select a from t)",
+        )
+
+    def test_unnameable_output_columns_are_renamed(self):
+        # orbital names its outputs output_probability.0; q cannot write that
+        # in a select phrase, but xcol takes any symbol.
+        self.validate(
+            'SELECT a AS "p.0", b AS c FROM t',
+            "`p.0`c xcol (select c0:a, c:b from t)",
+        )
+
+
+class TestFunctions(Validator):
+    def test_case(self):
+        self.validate(
+            "SELECT CASE WHEN a > 1 THEN 1 WHEN a > 0 THEN 2 ELSE 3 END FROM t",
+            "select ?[a>1;1;?[a>0;2;3]] from t",
+        )
+        self.validate("SELECT CASE b WHEN 1 THEN 2 ELSE 3 END FROM t", "select ?[b=1;2;3] from t")
+
+    def test_casts(self):
+        self.validate("SELECT CAST(a AS DOUBLE) FROM t", "select `float$a from t")
+        self.validate(
+            "SELECT CAST(a AS BIGINT) FROM t",
+            "select `long${f:floor x+0.5;f-(x=f-0.5)&1=f mod 2} a from t",
+        )
+        self.validate("SELECT CAST(a AS VARCHAR) FROM t", "select `$string a from t")
+
+    def test_scalars(self):
+        self.validate("SELECT COALESCE(a, b, 0) FROM t", "select 0^b^a from t")
+        self.validate(
+            "SELECT EXP(-a), LN(a), ABS(a) FROM t", "select exp neg a, log a, abs a from t"
+        )
+
+
+class TestStatements(Validator):
+    def test_insert(self):
+        self.validate("INSERT INTO t VALUES (1, 'x')", "`t insert (1;`x)")
+        self.validate("INSERT INTO t VALUES (1, 'x'), (2, 'y')", "`t insert (1 2;`x`y)")
+        self.validate(
+            "INSERT INTO t (a, b) VALUES (1, 'x'), (2, 'y')", "`t insert ([] a:1 2;b:`x`y)"
+        )
+
+    def test_update_and_delete(self):
+        self.validate("UPDATE t SET a = 1", "update a:1 from `t")
+        self.validate("UPDATE t SET a = 1 WHERE b = 2", "update a:(type a)$1 from `t where b=2")
+        self.validate("DELETE FROM t WHERE a = 1", "delete from `t where a=1")
+
+    def test_ddl(self):
+        self.validate(
+            "CREATE TABLE t (a INT, b VARCHAR, c DOUBLE)",
+            "t:([] a:`int$();b:`symbol$();c:`float$())",
+        )
+        self.validate("DROP TABLE t", "delete t from `.")
+
+
+class TestRefusals(Validator):
+    def test_unsupported_constructs_raise_by_default(self):
+        self.refuses("SELECT a FROM t FULL JOIN u ON t.k = u.k", "FULL JOIN")
+        self.refuses("SELECT a FROM t JOIN u ON t.k = u.j", "same-named columns")
+        self.refuses("SELECT CASE WHEN a > 1 THEN 1 END FROM t", "CASE without ELSE")
+        self.refuses("SELECT count FROM t", "q keyword")
+        self.refuses("SELECT a FROM db.t", "qualified table")
+        self.refuses("SELECT a FROM t ORDER BY a + 1", "ORDER BY")
+
+    def test_ignore_level_still_emits_q_that_refuses(self):
+        q = sqlglot.transpile(
+            "SELECT CASE WHEN a > 1 THEN 1 END FROM t",
+            write="q",
+            unsupported_level=ErrorLevel.IGNORE,
+        )[0]
+        self.assertIn("'unsupported", q)
