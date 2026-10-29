@@ -62,6 +62,10 @@ def substitute(node: exp.Expr, name: str, body: exp.Expr) -> exp.Expr:
 def source(gen: QGenerator, node: exp.Select) -> str:
     from_ = node.args.get("from_")
     left = from_.this
+    if node.args.get("joins"):
+        refused = ambiguous(gen, node)
+        if refused is not None:
+            return refused
     text = gen.operand_query(left) if isinstance(left, exp.Subquery) else gen.sql(left)
     for join in node.args.get("joins") or []:
         text = joined(gen, text, join)
@@ -111,10 +115,55 @@ def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
         sets = ", ".join(f"{k}:{j}" for k, j in renames)
         right = f"(update {sets} from {wrap(right)})"
     if side == "LEFT":
-        # lj takes the first match on the right, which is SQL's LEFT JOIN when
-        # the right side is unique on the keys.
-        return f"{left} lj {symbols} xkey {right}"
+        # Every match, as ej, and the left rows with none, the right's columns
+        # null: lj would take only the first match on the right.
+        from sqlglot_q.generator import LEFT_JOIN
+
+        return f"{LEFT_JOIN}[{symbols};{left};{right}]"
     return f"ej[{symbols};{left};{right}]"
+
+
+def ambiguous(gen: QGenerator, node: exp.Select) -> str | None:
+    """A joined q table has one column per name: t.n and u.n, read from both
+    sides of a join, would be the same column. The keys of an inner join on
+    one name are equal, so the same; a LEFT JOIN's right key is not (it is
+    NULL where no row matches, and q keeps the left's)."""
+    shared, nullable = set(), set()
+    from_name = node.args["from_"].this.alias_or_name
+    for join in node.args.get("joins") or []:
+        side = (join.args.get("side") or "").upper()
+        using = join.args.get("using")
+        on = join.args.get("on")
+        same = [u.name for u in using] if using else []
+        for c in conjuncts(on) if on is not None else []:
+            if isinstance(c, exp.EQ) and all(isinstance(x, exp.Column) for x in c.flatten()):
+                if c.this.name == c.expression.name:
+                    same.append(c.this.name)
+        if side == "LEFT":
+            nullable |= {(join.this.alias_or_name, k) for k in same}
+        elif side == "RIGHT":
+            nullable |= {(from_name, k) for k in same}
+        else:
+            shared |= set(same)
+    tables: dict[str, set[str]] = {}
+    for col in node.find_all(exp.Column):
+        if not col.table or col.find_ancestor(exp.Select) is not node:
+            continue
+        if col.find_ancestor(exp.Join) is not None:
+            continue
+        if (col.table, col.name) in nullable:
+            return gen.refuse(
+                f"{col.sql()}: the outer side's key of a join is NULL where no row matches; "
+                "the joined q table has the other side's key there. Select that one"
+            )
+        tables.setdefault(col.name, set()).add(col.table)
+    for name, owners in tables.items():
+        if len(owners) > 1 and name not in shared:
+            listed = " and ".join(f"{t}.{name}" for t in sorted(owners))
+            return gen.refuse(
+                f"{listed}: a joined q table has one column per name; rename one side in a subquery"
+            )
+    return None
 
 
 def non_null(keys: list[str]) -> str:
@@ -265,6 +314,8 @@ def query(gen: QGenerator, node: exp.Select) -> str:
             return limited(gen, node, text)
         if has_window(items):
             return windowed(gen, node, items, src, where, sort_result, sort_source, distinct)
+        if isinstance(items[0], exp.Star) and len(items) > 1:
+            return star_and(gen, node, items, src, where, sort_result, distinct)
         columns = "" if star else " " + ", ".join(projection(gen, items))
         text = f"select{distinct}{columns} from {src}{where}"
 
@@ -290,6 +341,25 @@ def projection(gen: QGenerator, items: list[exp.Expr]) -> list[str]:
         value = f"{{(count x)#y}}[i;{gen.sql(unalias(item))}]"
         out.append(f"{gen.name(item.alias)}:{value}" if isinstance(item, exp.Alias) else value)
     return out
+
+
+def star_and(gen, node, items, src, where, sort_result, distinct) -> str:
+    """SELECT *, e AS a: every column and a, which is q's update a:e, over the
+    rows WHERE keeps (update ... where would keep them all)."""
+    extra = items[1:]
+    if any(isinstance(i, exp.Star) for i in extra) or items[0].args.get("except_"):
+        return gen.refuse("SELECT * is translated with named expressions after it")
+    if not all(isinstance(i, exp.Alias) for i in extra):
+        return gen.refuse("SELECT *, <expression>: give the expression an alias")
+    if all(isinstance(i.this, exp.Column) for i in extra):
+        return gen.refuse("SELECT *, a copy of a column has no q form here")
+    base = f"(select from {src}{where})" if where else src
+    text = f"update {', '.join(projection(gen, extra))} from {base}"
+    if distinct:
+        text = f"distinct {text}"
+    if sort_result:
+        text = sort(sort_result, text, gen)
+    return limited(gen, node, text)
 
 
 def windowed(gen, node, items, src, where, sort_result, sort_source, distinct) -> str:

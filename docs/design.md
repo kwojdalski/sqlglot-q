@@ -205,14 +205,14 @@ becomes `0!select ... by`); the second must not.
 
 ## Known gaps
 
-- Joins must be on equality of same-named columns. `LEFT JOIN` is `lj`,
-  which takes the first match on the right: SQL's answer when the right side
-  is unique on the keys, not otherwise.
+- Joins must be on equality of columns. A joined q table has one column per
+  name, so a name read from both sides (`t.n` and `u.n`, a self-join) is
+  refused, as is a LEFT JOIN's right key of the left's name; rename one side
+  in a subquery.
 - `aj` keeps the right table's value for a column both sides have; DuckDB's
   `ASOF JOIN` keeps both columns. `ASOF JOIN` without `LEFT` drops the rows
   with no match, which aj keeps, and is refused.
-- A running `SUM` over a partition's leading nulls is 0 in q and NULL in
-  SQL. A window's alias that is also a source column replaces it in q.
+- A window's alias that is also a source column replaces it in q.
 - A symbol cannot start or end with a space (`` `$ `` trims), so in the
   default symbol mode `TRIM` has nothing to remove and a `CONCAT` that would
   start or end with one is refused; use `string_literals="string"`.
@@ -227,13 +227,16 @@ becomes `0!select ... by`); the second must not.
   without a sort ahead of them (`update s:sums x by g from t`) depend on q's
   row order and are refused; `count distinct x` counts a null as a value in q
   and is refused; `fby` is not read.
-- q's moving functions (`msum`, `mavg`) treat a null as 0 or skip it where a
-  SQL frame of nothing but nulls is NULL.
-- `UNION` matches columns by name in q and by position in SQL.
+- `CAST(x AS VARCHAR)` of a timestamp is q's text, `2024.01.31D10:00:...`.
+- `MODE`, `ARG_MAX` and `ARG_MIN` break ties by the first row in q; DuckDB's
+  choice among ties is its own.
+- `ORDER BY` an expression that is not a select item, `> ALL`/`< ANY`, the
+  `ALL` set operations and `BOOL_AND`/`BOOL_OR` (a NULL boolean) are
+  refused.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.
 - `ORDER BY` reads back from q as nulls first, q's order; the writer does
   not change q's null order to match a SQL `NULLS LAST`.
 - CTEs are inlined, so a CTE used twice is computed twice. Recursive CTEs,
-  window functions, `FULL`/`RIGHT` joins and correlated subqueries are
-  refused.
+  window functions, `FULL` joins and correlated subqueries other than
+  `EXISTS (... WHERE inner.k = outer.k ...)` are refused.

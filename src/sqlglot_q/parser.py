@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from sqlglot import exp
 from sqlglot.errors import ParseError
 
+from sqlglot_q import scalars
 from sqlglot_q.canonical import canonical
 from sqlglot_q.generator import (
     CUME_DIST,
@@ -31,9 +32,11 @@ from sqlglot_q.generator import (
     LAG_DEFAULT,
     LEAD_DEFAULT,
     LEFT,
+    LEFT_JOIN,
     LENGTH,
     MILLISECOND,
     MOD,
+    MOVING_NULLS,
     NAME,
     NON_NULL,
     NTILE,
@@ -46,6 +49,8 @@ from sqlglot_q.generator import (
     RIGHT,
     ROUND,
     ROUND_TO,
+    RUNNING_MAX,
+    RUNNING_MIN,
     RUNNING_SUM,
     SIGN,
     SUBSTRING,
@@ -57,6 +62,7 @@ from sqlglot_q.generator import (
     TEXT_MAX,
     TEXT_MIN,
     TEXT_NULL,
+    TEXT_OF,
     TEXT_PICK,
     TRUNC,
     TYPES,
@@ -111,6 +117,8 @@ KEYWORD_DYADS = {
     "lj",
     "xkey",
     "cross",
+    "inter",
+    "except",
     "xcol",
     "insert",
     "upsert",
@@ -476,7 +484,7 @@ class Statement:
         if isinstance(arg, Index) and isinstance(arg.expression, Where_):
             agg = AGGREGATES[word](this=arg.this)
             return exp.Filter(this=agg, expression=exp.Where(this=arg.expression.this))
-        return AGGREGATES[word](this=arg)
+        return AGGREGATES[word](this=distinct_of(arg))
 
     def monad(self, word: str, arg: exp.Expr) -> exp.Expr:
         if word == "not" and isinstance(arg, NoNulls):
@@ -501,6 +509,13 @@ class Statement:
             return exp.Coalesce(this=total, expressions=[exp.Literal.number(0)])
         if word == "first" and isinstance(arg, exp.GroupConcat):
             return arg
+        if (
+            word == "first"
+            and isinstance(arg, Enlisted)
+            and (call := scalars.find(arg.this)) is not None
+            and call.aggregate
+        ):
+            return arg.this  # first enlist f[...]: an aggregate of scalars.py
         if word == "first" and isinstance(arg, Enlisted) and isinstance(arg.this, exp.GroupConcat):
             return arg.this  # first enlist: the text form
         if word == "first" and isinstance(arg, TextOrder) and arg.args.get("nonnull"):
@@ -527,7 +542,7 @@ class Statement:
                 # sum x where c: SUM(x) FILTER (WHERE c)
                 agg = AGGREGATES[word](this=arg.this)
                 return exp.Filter(this=agg, expression=exp.Where(this=arg.expression.this))
-            return AGGREGATES[word](this=arg)
+            return AGGREGATES[word](this=distinct_of(arg))
         if word == "signum":
             # q's signum of a null is -1 (a null is below zero); SQL's SIGN is NULL
             minus = exp.Neg(this=exp.Literal.number(1))
@@ -579,6 +594,9 @@ class Statement:
             # one-row table.
             return arg if isinstance(arg, Chars) else Enlisted(this=arg)
         if word == "distinct":
+            if isinstance(arg, (exp.Intersect, exp.Except)) and not arg.args.get("distinct"):
+                arg.set("distinct", True)  # distinct a inter b: INTERSECT
+                return arg
             if is_query(arg):
                 arg.set("distinct", exp.Distinct())
                 return arg
@@ -623,6 +641,36 @@ class Statement:
         return exp.Cast(this=arg, to=exp.DataType(this=kind))
 
     def lambda_call(self, text: str, stop: set[str]) -> exp.Expr:
+        if text == LEFT_JOIN and self.is_("["):
+            joined = self.equijoin()
+            joined.set("side", "LEFT")
+            return joined
+        if text == TEXT_OF:
+            return exp.Cast(this=self.expr(stop), to=exp.DataType.build("VARCHAR"))
+        if text == scalars.ADD_MONTHS and self.is_("["):
+            self.expect("[")
+            arg = self.expr(set())
+            self.expect(";")
+            n = literal(self.expr(set()))
+            self.expect("]")
+            count = n.this.this if isinstance(n, exp.Neg) else n.this
+            if not (isinstance(n, (exp.Literal, exp.Neg)) and str(count).isdigit()):
+                self.fail("months are read as a literal count")
+            span = exp.Interval(this=exp.Literal.string(str(count)), unit=exp.var("MONTH"))
+            kind = exp.Sub if isinstance(n, exp.Neg) else exp.Add
+            return kind(this=arg, expression=span)
+        call = scalars.READ.get(text)
+        if call is not None and self.is_("["):
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            node = scalars.read(call, [literal(a) for a in args])
+            if node is None:
+                self.fail("a lambda with the wrong arguments")
+            return node
         if text == TEXT_NULL:
             return exp.Is(this=self.expr(stop), expression=exp.Null())  # empty: NULL
         if text == TEXT_LENGTH:
@@ -713,6 +761,16 @@ class Statement:
             return exp.Mod(this=x, expression=y)
         if text == RUNNING_SUM:
             return QCall(this=self.expr(stop), fn="sums")
+        if text in (RUNNING_MAX, RUNNING_MIN):
+            return QCall(this=self.expr(stop), fn="maxs" if text == RUNNING_MAX else "mins")
+        if text in MOVING_NULLS.values():
+            fn = next(k for k, v in MOVING_NULLS.items() if v == text)
+            self.expect("[")
+            n = self.expr(set())
+            self.expect(";")
+            arg = self.expr(set())
+            self.expect("]")
+            return QCall(this=arg, fn=fn, n=n)
         if text == SIGN:
             return exp.Sign(this=self.expr(stop))
         if text in (LAG_DEFAULT, LEAD_DEFAULT):
@@ -978,8 +1036,13 @@ class Statement:
                 self.fail("like takes a literal string pattern")
             pattern = sql_pattern(right.this)
             if isinstance(left, exp.Paren) and isinstance(left.this, exp.Lower):
-                return exp.ILike(this=left.this.this, expression=exp.Literal.string(pattern))
-            return exp.Like(this=left, expression=exp.Literal.string(pattern))
+                test = exp.ILike(this=left.this.this, expression=exp.Literal.string(pattern))
+            else:
+                test = exp.Like(this=left, expression=exp.Literal.string(pattern))
+            if any(ch in "%_" for ch in right.this):
+                # A % or _ q matches as itself: SQL's ESCAPE.
+                return exp.Escape(this=test, expression=exp.Literal.string("\\"))
+            return test
         if op in ("xasc", "xdesc"):
             return ordered(self, left, right, desc=op == "xdesc")
         if op == "sublist":
@@ -1003,6 +1066,9 @@ class Statement:
             return renamed(self, left, right)
         if op == "," and is_query(left) and is_query(right):
             return exp.Union(this=left, expression=right, distinct=False)
+        if op in ("inter", "except") and is_query(left) and is_query(right):
+            kind = exp.Intersect if op == "inter" else exp.Except
+            return kind(this=left, expression=right, distinct=False)
         if op == "insert":
             return inserted(self, left, right)
         self.fail(f"{op!r} has no SQL form here")
@@ -1353,15 +1419,21 @@ def conjunction(items: list[exp.Expr]) -> exp.Expr:
 
 
 def sql_pattern(q: str) -> str:
+    """A q like pattern as SQL's; a % or _ that q matches as itself, and so
+    a backslash, is escaped with a backslash (read with ESCAPE '\\')."""
+    literal = any(ch in "%_" for ch in q)
     out, i = [], 0
     while i < len(q):
         ch = q[i]
         if ch == "[" and i + 2 < len(q) and q[i + 2] == "]":
-            out.append(q[i + 1])
+            ch = q[i + 1]
             i += 3
-            continue
-        out.append({"*": "%", "?": "_"}.get(ch, ch))
-        i += 1
+        else:
+            i += 1
+            if ch in "*?":
+                out.append({"*": "%", "?": "_"}[ch])
+                continue
+        out.append(f"\\{ch}" if literal and ch in "%_\\" else ch)
     return "".join(out)
 
 
@@ -1731,7 +1803,12 @@ def aggregate(kind, arg):
     """An aggregate over x, or over x where c: SQL's FILTER (WHERE c)."""
     if isinstance(arg, Index) and isinstance(arg.expression, Where_):
         return exp.Filter(this=kind(this=arg.this), expression=exp.Where(this=arg.expression.this))
-    return kind(this=arg)
+    return kind(this=distinct_of(arg))
+
+
+def distinct_of(arg):
+    """sum distinct x: SUM(DISTINCT x)."""
+    return exp.Distinct(expressions=[arg.this]) if isinstance(arg, Distinct) else arg
 
 
 def operands(node: exp.Expr) -> list[exp.Expr]:
@@ -1747,7 +1824,7 @@ def operands(node: exp.Expr) -> list[exp.Expr]:
         return [bare(node.this), bare(node.args["low"]), bare(node.args["high"])]
     if isinstance(node, (exp.Like, exp.ILike)):
         return [bare(node.this)]
-    if isinstance(node, exp.Not):
+    if isinstance(node, (exp.Not, exp.Escape)):
         return operands(node.this)
     return []
 

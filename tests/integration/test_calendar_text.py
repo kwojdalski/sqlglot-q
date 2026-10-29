@@ -86,7 +86,7 @@ def test_q_returns_what_duckdb_returns(answers, sql):
 
 
 REFUSED = [
-    "SELECT DATE_DIFF('month', d, DATE '2024-03-01') FROM t",
+    "SELECT DATE_DIFF('week', d, DATE '2024-03-01') FROM t",
     "SELECT LAST_VALUE(n) OVER (ORDER BY a) FROM t",
     "SELECT REPLACE(b, b, 'x') FROM t",
     "SELECT NTILE(2) OVER () FROM t",

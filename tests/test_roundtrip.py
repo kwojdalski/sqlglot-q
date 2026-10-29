@@ -36,6 +36,8 @@ from tests.integration.test_nulls_more import DATA as MORE_NULL_DATA
 from tests.integration.test_nulls_more import QUERIES as MORE_NULLS
 from tests.integration.test_nulls_more import ordered as more_ordered
 from tests.integration.test_queries import QUERIES, STATEMENTS, TABLES
+from tests.integration.test_sql_more import DATA as MORE_DATA
+from tests.integration.test_sql_more import QUERIES as MORE
 from tests.integration.test_sqlglot_native import DATA as NATIVE_DATA
 from tests.integration.test_sqlglot_native import QUERIES as NATIVE
 from tests.integration.test_sqlglot_native import SCRIPTS
@@ -83,6 +85,7 @@ SQL = (
     + NULLS
     + MORE_NULLS
     + CALENDAR
+    + MORE
 )
 from tests.integration.test_reading import QUERIES as READING  # noqa: E402
 
@@ -108,6 +111,7 @@ SELECTS += NATIVE
 SELECTS += [(sql, "ORDER BY" in sql) for sql in NULLS]
 SELECTS += [(sql, more_ordered(sql)) for sql in MORE_NULLS]
 SELECTS += [(sql, False) for sql in CALENDAR]
+SELECTS += [(sql, False) for sql in MORE]
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
@@ -128,6 +132,8 @@ def test_sql_read_back_from_q_means_the_same(sql, ordered):
         if sql in MORE_NULLS
         else CALENDAR_DATA
         if sql in CALENDAR
+        else MORE_DATA
+        if sql in MORE
         else TABLES
     )
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back

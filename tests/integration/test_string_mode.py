@@ -46,6 +46,12 @@ QUERIES = [
     "SELECT a, COALESCE(NULLIF(w, 'b'), 'none') AS c FROM s",
     "SELECT a, COALESCE(w, 'none') AS c FROM s",
     "SELECT a FROM s WHERE STARTS_WITH(w, 'ab')",
+    # The functions of scalars.py, in their string forms.
+    "SELECT a, LPAD(w, 4, '*') AS l, RPAD(v, 3, '.') AS r FROM s",
+    "SELECT a, REPEAT(w, 2) AS p, STRPOS(w, 'b') AS q FROM s",
+    "SELECT MODE(w) AS m, ARG_MAX(w, a) AS x, ARG_MIN(a, w) AS n FROM s",
+    "SELECT a, CAST(a AS VARCHAR) AS c, CAST(a > 2 AS VARCHAR) AS b FROM s",
+    "SELECT a FROM s WHERE w LIKE 'a\\_%' ESCAPE '\\'",
 ]
 
 

@@ -50,3 +50,25 @@ def q_names(expression: exp.Expr) -> exp.Expr:
         return node
 
     return expression.transform(rename)
+
+
+def quantified_in(expression: exp.Expr) -> exp.Expr:
+    """x = ANY (SELECT ...) is x IN (SELECT ...), and x <> ALL (SELECT ...)
+    is x NOT IN (SELECT ...), NULLs and all; both already have a q form."""
+    if not isinstance(expression, exp.Select):
+        return expression
+
+    def rewrite(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, (exp.EQ, exp.NEQ)) and isinstance(node.expression, (exp.Any, exp.All)):
+            quantifier = node.expression
+            query = quantifier.this
+            if not isinstance(query, (exp.Subquery, exp.Select)):
+                return node
+            wanted = exp.Any if isinstance(node, exp.EQ) else exp.All
+            if not isinstance(quantifier, wanted):
+                return node
+            found = exp.In(this=node.this.copy(), query=query.copy())
+            return found if isinstance(node, exp.EQ) else exp.Not(this=found)
+        return node
+
+    return expression.transform(rewrite)

@@ -2,7 +2,39 @@
 
 ## Unreleased
 
-Fixed and added, each checked in q 5 against DuckDB and round-tripped:
+Fixed, where q answered something other than SQL with no error
+(`tests/integration/test_sql_more.py`):
+
+- A `LEFT JOIN` kept only the first match on the right (q's `lj`); it now
+  keeps every match (`ej` and the unmatched left rows).
+- A correlated subquery was evaluated once, its `b.g = a.g` read as `g = g`.
+  A correlated `EXISTS` on `inner.k = outer.k` is now a semi-join (and
+  `NOT EXISTS` keeps a null key, as SQL's does); every other correlated
+  subquery is refused.
+- `t.n` and `u.n` across a join, a self-join or a cross join were one
+  column in q; a LEFT JOIN's right key was the left's. Both are refused.
+- Running `MAX`/`MIN` over leading nulls were q's infinities, and sliding
+  `SUM`/`MAX`/`MIN` frames over nulls counted them as 0 or as the least.
+- `CAST(d AS VARCHAR)` wrote a date `2024.01.31` and a boolean `1`; SQL
+  writes `2024-01-31` and `true`.
+- `UNION` of differently named columns raised `'mismatch`.
+- Reading q: `s like "a_x"` read as SQL `LIKE 'a_x'`, where `_` is any
+  character; it is now escaped.
+
+Added, each checked in q 5 against DuckDB and round-tripped:
+
+- `scalars.py`, one table of q lambdas read both ways: `TRUNC`, `LPAD`,
+  `RPAD`, `REPEAT`, `STRPOS`/`POSITION`/`INSTR`, `LAST_DAY`, `MAKE_DATE`,
+  `DAYNAME`, `WEEK`, `DATE_DIFF` in months and years, and the aggregates
+  `ARG_MAX`, `ARG_MIN`, `MODE` and `QUANTILE_CONT`, in both string modes.
+- `SUM`/`AVG`/`MIN`/`MAX(DISTINCT x)`; `INTERSECT` and `EXCEPT`; `date +
+  INTERVAL n MONTH` (and `QUARTER`, `YEAR`, clamped to the month's end);
+  `DATE_TRUNC('week', ...)`; `PI()`; `LIKE ... ESCAPE`; `= ANY` and `<> ALL`
+  over a subquery; `SELECT *, e AS a`; `ROWS n PRECEDING` without `AND
+  CURRENT ROW`.
+
+Fixed and added earlier in this release, each checked in q 5 against DuckDB
+and round-tripped:
 
 - String mode: null tests, ORDER BY, comparisons with text, MIN/MAX, CASE,
   COALESCE, column = column, CONCAT, ||, LENGTH and STRING_AGG over q

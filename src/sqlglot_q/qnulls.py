@@ -70,6 +70,11 @@ def faithful(node: exp.Expr, filter: bool = False) -> exp.Expr:
             side = node.this if nullable(node.this) else node.expression
             return exp.Or(this=node, expression=exp.Is(this=side.copy(), expression=exp.Null()))
         return exp.Coalesce(this=node, expressions=[exp.true()])
+    if isinstance(node, exp.Escape):
+        test = node.this.this if isinstance(node.this, exp.Paren) else node.this
+        if nullable(test.this) and not filter:
+            return exp.Coalesce(this=node, expressions=[exp.false()])
+        return node
     if isinstance(node, CONTAINS) and nullable(node.this):
         # 0N in 1 2 and 0N within 1 3 are false in q, NULL in SQL
         return node if filter else exp.Coalesce(this=node, expressions=[exp.false()])

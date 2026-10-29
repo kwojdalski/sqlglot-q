@@ -38,6 +38,14 @@ NEGATED = {
 }
 
 
+def escaped(node: exp.Escape) -> exp.Expr:
+    """The LIKE an ESCAPE qualifies."""
+    test = node.this
+    while isinstance(test, (exp.Paren, exp.Not)):
+        test = test.this
+    return test
+
+
 def nullable(node: exp.Expr) -> bool:
     """Whether a value can be null: a literal cannot."""
     while isinstance(node, exp.Paren):
@@ -105,6 +113,8 @@ def holds(gen: QGenerator, node: exp.Expr) -> str:
         low = node.args["low"]
         sides = [low, node.this] if nullable(low) else []
         return guarded(gen, sides, gen.sql(node))
+    if isinstance(node, exp.Escape):
+        return guarded(gen, [escaped(node).this], gen.sql(node))
     if isinstance(node, TEXT_TESTS):
         # A null symbol is ` , the empty one: only a pattern that matches
         # the empty text ('%', '') matches it, and only those need a guard.
@@ -152,6 +162,15 @@ def fails(gen: QGenerator, node: exp.Expr) -> str:
         return guarded(gen, sides, f"not {gen.sql(node)}")
     if isinstance(node, TEXT_TESTS):
         return guarded(gen, [node.this], f"not {gen.sql(node)}")
+    if isinstance(node, exp.Escape):
+        return guarded(gen, [escaped(node).this], f"not {gen.sql(node)}")
     if isinstance(node, exp.Boolean):
         return "0b" if node.this else "1b"
+    if isinstance(node, exp.Exists):
+        from sqlglot_q.correlated import exists
+
+        query = node.this.this if isinstance(node.this, exp.Subquery) else node.this
+        correlated = exists(gen, query, negated=True)
+        if correlated is not None:
+            return correlated
     return f"not {gen.operand(node)}"

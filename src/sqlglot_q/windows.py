@@ -212,12 +212,19 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
             word = NULL_SAFE.get(type(fn), WHOLE[type(fn)])
             return f"{word} {arg}", False, False
         if frame in ("range", "rows"):
-            from sqlglot_q.generator import RUNNING_SUM
+            from sqlglot_q.generator import RUNNING_MAX, RUNNING_MIN, RUNNING_SUM
 
             # sums of a leading run of nulls is 0; SQL's running SUM is NULL.
-            word = RUNNING_SUM if isinstance(fn, exp.Sum) else RUNNING[type(fn)]
+            word = {exp.Sum: RUNNING_SUM, exp.Max: RUNNING_MAX, exp.Min: RUNNING_MIN}.get(
+                type(fn), RUNNING[type(fn)]
+            )
             return f"{word} {arg}", frame == "range", True
-        return f"{frame} {MOVING[type(fn)]} {arg}", False, True
+        from sqlglot_q.generator import MOVING_NULLS
+
+        word = MOVING[type(fn)]
+        if word in MOVING_NULLS:
+            return f"{MOVING_NULLS[word]}[{frame};{arg}]", False, True
+        return f"{frame} {word} {arg}", False, True
     raise Refused(f"{type(fn).__name__} OVER has no q translation")
 
 
@@ -231,6 +238,8 @@ def frame_of(spec: exp.WindowSpec | None, has_order: bool):
     end, end_side = spec.args.get("end"), (spec.args.get("end_side") or "").upper()
     if start == "UNBOUNDED" and end == "UNBOUNDED" and end_side == "FOLLOWING":
         return "whole"
+    if end is None and start_side == "PRECEDING":
+        end = "CURRENT ROW"  # ROWS UNBOUNDED PRECEDING, ROWS 2 PRECEDING
     if end != "CURRENT ROW":
         raise Refused("a window frame is translated when it ends at the current row")
     if start == "UNBOUNDED" and start_side == "PRECEDING":

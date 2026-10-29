@@ -142,7 +142,8 @@ class TestSelect(Validator):
         )
         self.validate(
             "SELECT * FROM t LEFT JOIN u ON t.k = u.k",
-            "select from t lj `k xkey (select from u where not null k)",
+            "select from {k:(),x;ej[k;y;z] uj y where not (k#y) in k#z}"
+            "[`k;t;(select from u where not null k)]",
         )
         self.validate("SELECT * FROM t CROSS JOIN u", "select from t cross u")
 
@@ -194,7 +195,11 @@ class TestFunctions(Validator):
             "SELECT CAST(a AS BIGINT) FROM t",
             "select `long${f:floor x+0.5;f-(x=f-0.5)&1=f mod 2} a from t",
         )
-        self.validate("SELECT CAST(a AS VARCHAR) FROM t", "select `$string a from t")
+        self.validate(
+            "SELECT CAST(a AS VARCHAR) FROM t",
+            'select `${$[-14h=t:type x;ssr[string x;".";"-"];14h=t;ssr[;".";"-"] each string x;'
+            '-1h=t;$[x;"true";"false"];1h=t;("false";"true") x;string x]} a from t',
+        )
 
     def test_scalars(self):
         self.validate("SELECT COALESCE(a, b, 0) FROM t", "select 0^b^a from t")
@@ -227,7 +232,7 @@ class TestTemporal(Validator):
             "SELECT ts + INTERVAL 90 SECOND AS x FROM t",
             "select x:ts+0D00:01:30.000000000 from t",
         )
-        self.refuses("SELECT d + INTERVAL 1 MONTH FROM t", "fixed intervals")
+        self.refuses("SELECT d + INTERVAL '1.5' MONTH FROM t", "fixed intervals")
 
     def test_parts(self):
         self.validate(

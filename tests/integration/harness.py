@@ -9,6 +9,7 @@ starts in.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import json
 import math
 import re
@@ -165,6 +166,8 @@ def normal(rows: Rows) -> Rows:
             # Python's isoformat drops the zero fraction.
             v = re.sub(r"\.?0+$", "", v) if "." in v else v
             return v.replace(" ", "T")
+        if isinstance(v, decimal.Decimal):
+            v = float(v)  # DuckDB's type for a literal like 3.14159 read from q
         if isinstance(v, (int, float)):
             # q's count is an int where DuckDB's is a bigint, and its avg of
             # longs a float: compare values, not types.

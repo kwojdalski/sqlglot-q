@@ -31,6 +31,15 @@ def window_stage(parser, items, keys, source) -> exp.Expr:
         from sqlglot_q.parser import Renamed
 
         return Renamed(this=source, pairs=[(i.alias, i.this.name) for i in items])
+    if (
+        not keys
+        and items
+        and all(isinstance(i, exp.Alias) for i in items)
+        and all(function(parser, i.this, None, non_null, QCall) is None for i in items)
+        and not any(i.this.find(QCall) for i in items)
+    ):
+        # update a:e from t: SELECT *, e AS a, the generator's columns beside *.
+        return star_select(parser, [exp.Star(), *items], source)
     if len(items) != 1 or not isinstance(items[0], exp.Alias):
         parser.fail("update of a table value is read as one window, name:value")
     name, value = items[0].alias, items[0].this
@@ -111,7 +120,13 @@ def window_stage(parser, items, keys, source) -> exp.Expr:
     if windowed(source):
         source.expressions.append(alias)
         return source
-    node = exp.Select(expressions=[exp.Star(), alias])
+    return star_select(parser, [exp.Star(), alias], source)
+
+
+def star_select(parser, expressions, source) -> exp.Expr:
+    from sqlglot_q.parser import is_query
+
+    node = exp.Select(expressions=expressions)
     if is_query(source):
         inner = source
         plain = (

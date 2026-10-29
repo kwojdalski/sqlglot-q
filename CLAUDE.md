@@ -57,6 +57,9 @@ both right.
 | `src/sqlglot_q/generator.py` | `QGenerator`: sqlglot's conventions (`<key>_sql` methods, `TRANSFORMS`, `FUNCTIONS`), dispatching only to handlers defined for q; anything else is refused |
 | `src/sqlglot_q/rewrites.py` | tree rewrites in the shape of `sqlglot.transforms`, chained with sqlglot's own by `transforms.preprocess` |
 | `src/sqlglot_q/query.py` | SELECT, which in q is several expressions composed (group, having, sort, limit) |
+| `src/sqlglot_q/scalars.py` | SQL functions with no q word, each one q lambda; the one table both directions read |
+| `src/sqlglot_q/correlated.py` | subqueries reading the outer query: a correlated `EXISTS` as a semi-join, the rest refused |
+| `src/sqlglot_q/truth.py`, `qnulls.py` | SQL's three-valued conditions in q, and q's two-valued ones read as SQL |
 | `src/sqlglot_q/reserved.json` | q's reserved names, which can't name a column (shared with q-lint) |
 | `src/sqlglot_q/cli.py` | the `sqlglot-q` command |
 | `tests/test_q.py` | the q text each construct becomes |

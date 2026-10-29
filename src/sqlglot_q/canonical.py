@@ -36,6 +36,8 @@ def canonical(node: exp.Expr) -> exp.Expr:
                 child = n.args.get(slot)
                 if not isinstance(child, exp.Expr) or not compound(child):
                     continue
+                if isinstance(n, exp.Escape) and slot == "this":
+                    continue  # x LIKE p ESCAPE e is one operator
                 if isinstance(n, exp.Not) and not isinstance(child, exp.Connector):
                     # SQL's NOT binds looser than everything but AND and OR:
                     # NOT b IN (...) is NOT (b IN (...)) already.

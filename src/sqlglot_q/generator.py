@@ -112,6 +112,7 @@ TRUNC = {
     "MONTH": "{`timestamp$`date$`month$x}",
     "QUARTER": "{`timestamp$`date$3 xbar `month$x}",
     "YEAR": "{`timestamp$`date$`month$12*(`year$x)-2000}",
+    "WEEK": "{`timestamp$`week$x}",  # the Monday, as SQL
 }
 # Text functions, each over the rows: symbols go through their strings.
 REPLACE = ("{`$ssr[;y;z] each string x}", "{ssr[;y;z] each x}")
@@ -119,6 +120,17 @@ SUBSTRING = ("{`$sublist[(y-1;z)] each string x}", "{sublist[(y-1;z)] each x}")
 SUBSTRING_FROM = ("{`$(y-1)_' string x}", "{(y-1)_' x}")
 REVERSE = ("{`$reverse each string x}", "{reverse each x}")
 RUNNING_SUM = "{?[0=sums not null x;x 0N;sums x]}"
+# maxs and mins start from an infinity (maxs 0N 5 is -0W 5): NULL until the
+# first value, as SQL's running MAX and MIN.
+RUNNING_MAX = "{?[0=sums not null x;x 0N;maxs x]}"
+RUNNING_MIN = "{?[0=sums not null x;x 0N;mins x]}"
+# Sliding frames with nulls: msum counts a null as 0 and mmin takes it as the
+# least; SQL skips nulls, and a frame of only nulls is NULL. (mavg skips them.)
+MOVING_NULLS = {
+    "msum": "{?[0=x msum not null y;y 0N;x msum y]}",
+    "mmax": "{?[0=x msum not null y;y 0N;x mmax y]}",
+    "mmin": "{?[0=x msum not null y;y 0N;x mmin (max y)^y]}",
+}
 # SIGN(NULL) is NULL; q's signum of a null is -1, a null being below zero.
 SIGN = "{?[null x;0Ni;signum x]}"
 # LAG/LEAD with a default: the default only past the partition's edge, in the
@@ -152,6 +164,15 @@ TYPES = {
     exp.DataType.Type.TIME: ("time", "`time$()"),
 }
 INTEGERS = {"short", "int", "long"}
+# CAST(x AS VARCHAR): q's string, but a date as SQL writes it (2024-01-31,
+# not 2024.01.31) and a boolean as true or false (not 1 or 0).
+TEXT_OF = (
+    '{$[-14h=t:type x;ssr[string x;".";"-"];14h=t;ssr[;".";"-"] each string x;'
+    '-1h=t;$[x;"true";"false"];1h=t;("false";"true") x;string x]}'
+)
+# LEFT JOIN: ej's matches, and the left rows with none (uj gives them the
+# right's columns, null).
+LEFT_JOIN = "{k:(),x;ej[k;y;z] uj y where not (k#y) in k#z}"
 HALF_EVEN = "{f:floor x+0.5;f-(x=f-0.5)&1=f mod 2}"
 
 TEXT = {
@@ -175,7 +196,7 @@ def atomic(node: exp.Expr) -> bool:
         return True  # DATE '...' is a q date literal
     # A subquery prints parenthesised already (q_subquery).
     return isinstance(
-        node, (exp.Column, exp.Literal, exp.Null, exp.Boolean, exp.Paren, exp.Subquery)
+        node, (exp.Column, exp.Literal, exp.Null, exp.Boolean, exp.Paren, exp.Subquery, exp.Pi)
     )
 
 
@@ -379,6 +400,12 @@ class QGenerator(Generator):
         if width is not None:
             # FLOOR(x / n) * n buckets x by n: q's n xbar x.
             return f"{self.operand(width)} xbar {self.sql(node.this.this.this.this)}"
+        months = calendar_months(node)
+        if months is not None:
+            # d + INTERVAL 1 MONTH: a month is no fixed timespan, so a lambda.
+            from sqlglot_q.scalars import ADD_MONTHS
+
+            return f"{ADD_MONTHS}[{self.sql(left)};{months}]"
         if isinstance(node, COMPARISONS) and (
             isinstance(left, exp.Null) or isinstance(right, exp.Null)
         ):
@@ -439,6 +466,11 @@ class QGenerator(Generator):
         return f"{QUARTER} {self.operand(node.this)}"
 
     def datediff_sql(self, node: exp.DateDiff) -> str:
+        from sqlglot_q import scalars
+
+        call = scalars.find(node)
+        if call is not None:
+            return scalars.write(self, node, call)
         unit = (node.text("unit") or "DAY").upper()
         if unit not in ("DAY", "DAYS"):
             return self.refuse(f"DATE_DIFF in {unit} has no q translation here")
@@ -471,9 +503,14 @@ class QGenerator(Generator):
     def exists_sql(self, node: exp.Exists) -> str:
         # Uncorrelated: whether the subquery has a row. A subquery reading the
         # outer query's columns is refused by q when it runs ('col).
+        from sqlglot_q.correlated import exists
+
         query = node.this
         if isinstance(query, exp.Subquery):
             query = query.this
+        correlated = exists(self, query)
+        if correlated is not None:
+            return correlated
         return f"0<count {self.operand_query(query)}"
 
     def mod_sql(self, node: exp.Mod) -> str:
@@ -507,7 +544,12 @@ class QGenerator(Generator):
         subject = self.operand(node.this)
         query = node.args.get("query")
         if query is not None:
+            from sqlglot_q.correlated import refuse_correlated
+
             select = query.this if isinstance(query, exp.Subquery) else query
+            refused = refuse_correlated(self, select, "IN (SELECT ...)")
+            if refused is not None:
+                return refused
             if len(select.expressions) != 1:
                 return self.refuse("IN (SELECT ...) needs exactly one column")
             column = select.expressions[0]
@@ -525,6 +567,28 @@ class QGenerator(Generator):
         if not (isinstance(pattern, exp.Literal) and pattern.is_string):
             return self.refuse("LIKE is only translated with a literal pattern")
         return f"{self.operand(node.this)} like {self.chars(like_pattern(pattern.this))}"
+
+    def escape_sql(self, node: exp.Escape) -> str:
+        test, escape = node.this, node.expression
+        while isinstance(test, exp.Paren):
+            test = test.this
+        if isinstance(test, exp.Not):
+            # NOT LIKE ... ESCAPE: DuckDB puts the NOT inside the ESCAPE.
+            inner = exp.Escape(this=test.this, expression=escape)
+            return f"not {self.sql(inner)}"
+        if not (
+            isinstance(test, (exp.Like, exp.ILike))
+            and isinstance(test.expression, exp.Literal)
+            and test.expression.is_string
+            and isinstance(escape, exp.Literal)
+            and len(escape.this) == 1
+        ):
+            return self.refuse("LIKE ... ESCAPE is translated with a literal pattern and character")
+        sql = test.expression.this
+        if isinstance(test, exp.ILike):
+            text = like_pattern(sql.lower(), escape.this.lower())
+            return f"(lower {self.sql(test.this)}) like {self.chars(text)}"
+        return f"{self.operand(test.this)} like {self.chars(like_pattern(sql, escape.this))}"
 
     def ilike_sql(self, node: exp.ILike) -> str:
         pattern = node.expression
@@ -562,14 +626,22 @@ class QGenerator(Generator):
         return f"count {col} where not {self.is_null(col)}"
 
     def aggregate(self, node: exp.Expr) -> str:
-        if node.args.get("distinct") or isinstance(node.this, exp.Distinct):
-            return self.refuse(
-                f"{node.sql()}: DISTINCT inside an aggregate is only translated for COUNT"
-            )
+        arg = node.this
+        if isinstance(arg, exp.Distinct):
+            if len(arg.expressions) != 1:
+                return self.refuse(f"{node.sql()}: DISTINCT is translated for one column")
+            arg = arg.expressions[0]
+            if not isinstance(node, (exp.Min, exp.Max)):
+                # SUM(DISTINCT x): over x's distinct values, a null among them
+                # skipped as before. MIN and MAX are the same either way.
+                word = NULL_SAFE.get(type(node), AGGREGATES[type(node)])
+                return f"{word} distinct {self.operand(arg)}"
+        elif node.args.get("distinct"):
+            return self.refuse(f"{node.sql()}: DISTINCT here has no q translation")
         word = NULL_SAFE.get(type(node), AGGREGATES[type(node)])
         if not self.symbols and isinstance(node, (exp.Min, exp.Max)):
             word = TEXT_MIN if isinstance(node, exp.Min) else TEXT_MAX
-        return f"{word} {self.sql(node.this)}"
+        return f"{word} {self.sql(arg)}"
 
     sum_sql = avg_sql = min_sql = max_sql = aggregate
 
@@ -656,10 +728,10 @@ class QGenerator(Generator):
         # || is NULL when any side is; CONCAT skips nulls.
         if not self.symbols:
             # || is NULL when a side is; a null string is the empty one.
-            guards = [self.is_null(self.operand(c)) for c in columns]
+            guards = [self.is_null(self.sql(c)) for c in columns]
             guard = guards[0] if len(guards) == 1 else "|".join(f"({g})" for g in guards)
             return f'{TEXT_PICK}[{guard};(count i)#enlist "";{text}]'
-        guards = [f"null {self.operand(c)}" for c in columns]
+        guards = [f"null {self.sql(c)}" for c in columns]
         guard = guards[0] if len(guards) == 1 else "|".join(f"({g})" for g in guards)
         empty = "`" if self.symbols else '""'
         return f"?[{guard};{empty};{text}]"
@@ -731,7 +803,7 @@ class QGenerator(Generator):
             return f'"{PARSE[TYPES[kind][0]]}"${self.chars(node.this.this)}'
         arg = self.operand(node.this)
         if kind in TEXT:
-            return f"`$string {arg}" if self.symbols else f"string {arg}"
+            return f"`${TEXT_OF} {arg}" if self.symbols else f"{TEXT_OF} {arg}"
         if kind not in TYPES:
             return self.refuse(f"CAST to {node.to.sql()} has no q type here")
         name = TYPES[kind][0]
@@ -879,9 +951,14 @@ class QGenerator(Generator):
         # A subquery reached here stands for a value (WHERE a > (SELECT ...)):
         # q's select returns a table, so take its one column's first item.
         # FROM, JOIN and UNION read subqueries as tables, via operand_query.
+        from sqlglot_q.correlated import refuse_correlated
+
         select = node.this
         if not isinstance(select, exp.Select) or len(select.expressions) != 1:
             return self.refuse("a scalar subquery needs exactly one column")
+        refused = refuse_correlated(self, select, "a scalar subquery")
+        if refused is not None:
+            return refused
         inner = select.copy()
         inner.set("expressions", [exp.alias_(unalias(select.expressions[0]), "x")])
         # Parenthesised, or a select phrase around it reads its from ('from).
@@ -901,7 +978,7 @@ class QGenerator(Generator):
     def union_sql(self, node: exp.Union) -> str:
         from sqlglot_q.query import limited, order_terms, output_names, sort
 
-        both = f"{self.operand_query(node.this)},{self.operand_query(node.expression)}"
+        both = f"{self.operand_query(node.this)},{self.operand_query(aligned(node))}"
         text = both if not node.args.get("distinct") else f"distinct {both}"
         # ORDER BY and LIMIT after a UNION belong to the union, and name the
         # columns of its first query.
@@ -914,6 +991,24 @@ class QGenerator(Generator):
             terms, _ = order_terms(self, order, items, output_names(items), allow_source=False)
             text = sort(terms, text, self)
         return limited(self, node, text)
+
+    def set_operation(self, node: exp.Expr, word: str) -> str:
+        from sqlglot_q.query import limited
+
+        if not node.args.get("distinct"):
+            return self.refuse(f"{node.key.upper()} ALL has no q translation here")
+        if node.args.get("order"):
+            return self.refuse(f"ORDER BY after {node.key.upper()} has no q translation here")
+        # The rows of the first in (or not in) the second, each once, as
+        # SQL's set operations; q's except and inter compare whole rows.
+        left, right = self.operand_query(node.this), self.operand_query(aligned(node))
+        return limited(self, node, f"distinct {left} {word} {right}")
+
+    def intersect_sql(self, node: exp.Intersect) -> str:
+        return self.set_operation(node, "inter")
+
+    def except_sql(self, node: exp.Except) -> str:
+        return self.set_operation(node, "except")
 
     def operand_query(self, node: exp.Expr) -> str:
         """A query used as a table: FROM (...), a join side, a UNION operand."""
@@ -1215,12 +1310,17 @@ def number(text: str) -> str:
     return out if any(c in out for c in ".e") else f"{out}f"
 
 
-def like_pattern(sql: str) -> str:
+def like_pattern(sql: str, escape: str | None = None) -> str:
     """A SQL LIKE pattern as a q like pattern: % is *, _ is ?, and q's own
-    wildcard characters are bracketed so they match themselves."""
+    wildcard characters are bracketed so they match themselves. After the
+    ESCAPE character, % and _ are themselves (q's like has no escape)."""
     out = []
-    for ch in sql:
-        if ch == "%":
+    chars = iter(sql)
+    for ch in chars:
+        if escape is not None and ch == escape:
+            ch = next(chars, "")
+            out.append(f"[{ch}]" if ch in "*?[]" else ch)
+        elif ch == "%":
             out.append("*")
         elif ch == "_":
             out.append("?")
@@ -1240,7 +1340,7 @@ def qtext(self, node) -> str:
 def _select_rewrites():
     from sqlglot import transforms
 
-    from sqlglot_q.rewrites import expand_group_by_all, q_names
+    from sqlglot_q.rewrites import expand_group_by_all, q_names, quantified_in
 
     # sqlglot's own rewrites, as its dialects use them: QUALIFY and DISTINCT
     # ON become a window in a subquery, which the window stages translate.
@@ -1249,13 +1349,32 @@ def _select_rewrites():
             transforms.eliminate_qualify,
             transforms.eliminate_distinct_on,
             expand_group_by_all,
+            quantified_in,
             q_names,
         ]
     )
 
 
+def _scalar_calls():
+    from sqlglot_q.scalars import CALLS
+
+    return CALLS
+
+
+def scalar(self, node: exp.Expr) -> str:
+    from sqlglot_q import scalars
+
+    call = scalars.find(node)
+    if call is None:
+        return self.refuse(f"{node.key.upper()} with these arguments has no q translation")
+    return scalars.write(self, node, call)
+
+
 QGenerator.TRANSFORMS = {
     QText: qtext,
+    exp.Pi: lambda self, node: "3.141592653589793",
+    # The functions in scalars.py, each a q lambda.
+    **{call.kind: scalar for call in _scalar_calls() if call.kind is not exp.DateDiff},
     exp.Select: _select_rewrites(),
     # Statistics. q's med counts a null as the smallest value; SQL's MEDIAN
     # skips it. sdev, dev, svar and var skip nulls as SQL does.
@@ -1278,6 +1397,53 @@ QGenerator.TRANSFORMS = {
         else self.refuse("IGNORE NULLS is translated for ANY_VALUE only")
     ),
 }
+
+
+def aligned(node: exp.Expr) -> exp.Expr:
+    """The second query of a UNION (INTERSECT, EXCEPT) with the first's
+    column names: SQL names the result's columns by the first query, and q's
+    , (and inter, except) wants the same names on both sides."""
+    from sqlglot_q.query import output_names
+
+    first = node.this
+    while isinstance(first, (exp.SetOperation, exp.Subquery)):
+        first = first.this
+    second = node.expression
+    inner = second.this if isinstance(second, exp.Subquery) else second
+    if not (isinstance(first, exp.Select) and isinstance(inner, exp.Select)):
+        return second
+    names, theirs = output_names(first.expressions), output_names(inner.expressions)
+    if None in names or None in theirs or names == theirs or len(names) != len(theirs):
+        return second
+    inner = inner.copy()
+    inner.set(
+        "expressions",
+        [
+            exp.alias_(unalias(i), n) if t != n else i
+            for i, n, t in zip(inner.expressions, names, theirs, strict=True)
+        ],
+    )
+    return inner
+
+
+CALENDAR = {"MONTH": 1, "QUARTER": 3, "YEAR": 12}
+
+
+def calendar_months(node: exp.Expr) -> int | None:
+    """x + INTERVAL n MONTH (or QUARTER, YEAR), and x - ...: the months added."""
+    right = node.expression
+    if not (isinstance(node, (exp.Add, exp.Sub)) and isinstance(right, exp.Interval)):
+        return None
+    unit = (right.text("unit") or "").upper().rstrip("S")
+    value = right.this
+    if unit not in CALENDAR or not isinstance(value, exp.Literal):
+        return None
+    try:
+        n = int(value.this)
+    except ValueError:
+        return None
+    n *= CALENDAR[unit]
+    return -n if isinstance(node, exp.Sub) else n
 
 
 def replaces_all(conflict: exp.OnConflict) -> bool:
