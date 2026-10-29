@@ -1,0 +1,69 @@
+name: Release
+
+# Push a tag vX.Y.Z (matching pyproject.toml's version) to publish to PyPI.
+# Publishing uses PyPI's trusted publishing: no token is stored here; PyPI
+# trusts this workflow in this repository, under the `pypi` environment.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+        with:
+          python-version: "3.12"
+      - name: The tag names the version being released
+        run: |
+          version=$(uv version --short)
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version"; exit 1; }
+      - run: uv sync
+      - run: uv run ruff check .
+      # q is not on the runners; tests/integration skips itself. Run the full
+      # suite locally, with q, before tagging (CLAUDE.md).
+      - run: uv run pytest
+      - run: uv build
+      - run: uvx twine check dist/*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/sqlglot-q/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - uses: astral-sh/setup-uv@v10.3.3
+      - run: uv publish --trusted-publishing always dist/*
+
+  github-release:
+    needs: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          awk -v v="## $version" '$0==v{on=1;next} /^## /{on=0} on' CHANGELOG.md > notes.md
+      - run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes-file notes.md
+        env:
+          GH_TOKEN: ${{ github.token }}

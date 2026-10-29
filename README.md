@@ -29,14 +29,15 @@ back settles: after one round trip, another changes nothing.
 
 ## Install
 
-sqlglot-q is not on PyPI yet, so install it from GitHub, next to sqlglot:
+```sh
+pip install sqlglot sqlglot-q      # or: uv add sqlglot sqlglot-q
+```
+
+Until the first PyPI release, or for the latest commit, install from GitHub:
 
 ```sh
 pip install sqlglot "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q"
-# or, with uv
-uv add sqlglot "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q"
-# or, from a local clone, editable
-pip install -e path/to/sqlglot-q
+pip install -e path/to/sqlglot-q   # a local clone, editable
 ```
 
 It needs Python 3.11+ and sqlglot 30+. Installing it is all the setup there
@@ -71,6 +72,10 @@ licence, such as the free personal one). The translation does not.
 - time buckets: DuckDB's `TIME_BUCKET`, `DATE_TRUNC` to a day or less, and
   `FLOOR(x / n) * n` are q's `xbar`
 - as-of joins: `ASOF LEFT JOIN ... USING (sym, time)` is q's `aj`
+- window functions: `SUM`/`AVG`/`MIN`/`MAX`/`COUNT` over a partition,
+  running (`ROWS` or the default `RANGE`) or sliding (`n PRECEDING`), and
+  `ROW_NUMBER`, `RANK`, `DENSE_RANK`, `LAG`, `LEAD`, as q's `update ... by`
+  with `sums`, `msum`, `xprev` and friends
 
 ```python
 sqlglot.transpile(
@@ -107,7 +112,7 @@ sqlglot.transpile("SELECT a FROM t WHERE s = 'ab'", write="q", string_literals="
 pipeline as SQL, so a model trained in Python can be scored inside kdb+.
 
 ```sh
-pip install "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q" orbital scikit-learn pandas
+pip install sqlglot-q orbital scikit-learn pandas
 ```
 
 orbital compiles through ibis, which has no q backend, so passing

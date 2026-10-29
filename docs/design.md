@@ -36,6 +36,32 @@ Each of these was measured in q 5 and is pinned by `tests/integration`.
 | `ASOF LEFT JOIN q USING (sym, time)` | `aj[...;t;q]` | aj wants the right table sorted | `` aj[`sym`time;t;`sym`time xasc q] `` |
 | alias `"p.0"` | `p.0:...` | not a name q can write in a select | placeholder, then `` `p.0 xcol `` |
 
+## Window functions
+
+SQL computes a select's windows after `WHERE` and before the projection,
+each over its partition in its own order. q does that with `update ... by`,
+one stage per window, over the filtered table sorted on the window's order:
+
+    SELECT g, SUM(x) OVER (PARTITION BY g ORDER BY o) AS s FROM t WHERE c
+    select g, s from (update s:last s by g,o from (update s:sums x by g from
+        (`o xasc (select from t where c))))
+
+| SQL | q, per partition |
+|---|---|
+| `SUM(x) OVER (PARTITION BY g)` | `sum x` (update broadcasts it) |
+| running, `ROWS UNBOUNDED PRECEDING` | `sums x`, `avgs`, `maxs`, `mins`; `COUNT(*)` is `1+til count i` |
+| running, the default `RANGE` | the same, then `update s:last s by g,o`: rows tied on `o` are peers and share the value at the last of them |
+| `ROWS n PRECEDING` | `(n+1) msum x`, `mavg`, `mmax`, `mmin`, `mcount` |
+| `ROW_NUMBER()`, `RANK()`, `DENSE_RANK()` | `1+til count i`, `1+o?o`, `sums differ o` |
+| `LAG(x, n)`, `LEAD(x, n)` | `n xprev x`, `neg[n] xprev x` |
+
+Windows in one expression that share a partition and order are one stage
+(`update vwap:(sums px*qty)%sums qty by sym from ...`); others get a stage
+each, named `w0`, `w1`, that the expression then uses. Refused: `LAG` and
+`LEAD` with a default (SQL fills only past the edge, `^` would fill `x`'s own
+nulls), frames that end anywhere but the current row, `NTILE` and the like,
+and windows over a grouped result.
+
 ## Reading q
 
 `parser.py` reads qSQL into sqlglot's tree. It is the generator run
@@ -72,6 +98,8 @@ becomes `0!select ... by`); the second must not.
 - `aj` keeps the right table's value for a column both sides have; DuckDB's
   `ASOF JOIN` keeps both columns. `ASOF JOIN` without `LEFT` drops the rows
   with no match, which aj keeps, and is refused.
+- A running `SUM` over a partition's leading nulls is 0 in q and NULL in
+  SQL. A window's alias that is also a source column replaces it in q.
 - `UNION` matches columns by name in q and by position in SQL.
 - `SUM` of no non-null values is 0 in q and NULL in SQL; nulls sort first in
   q, last in DuckDB and Postgres by default.

@@ -102,6 +102,8 @@ def atomic(node: exp.Expr) -> bool:
         return False
     if isinstance(node, exp.Interval):
         return True  # a timespan literal
+    if type(node).__name__ == "QText":
+        return True  # q_qtext parenthesises it itself
     if isinstance(node, exp.Cast) and is_text(node.this) and node.to.this in TEMPORAL:
         return True  # DATE '...' is a q date literal
     # A subquery prints parenthesised already (q_subquery).
@@ -429,6 +431,11 @@ class QGenerator(Generator):
         if otherwise is None:
             return self.refuse("IF without an else value has no q form")
         return f"?[{self.sql(node.this)};{self.sql(node.args['true'])};{self.sql(otherwise)}]"
+
+    def q_qtext(self, node) -> str:
+        # q a window stage computed (windows.py); one token or parenthesised.
+        text = node.this
+        return text if " " not in text else f"({text})"
 
     def q_alias(self, node: exp.Alias) -> str:
         return f"{self.name(node.alias)}:{self.sql(node.this)}"

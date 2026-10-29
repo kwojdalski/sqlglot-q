@@ -51,6 +51,8 @@ both right.
 |---|---|
 | `src/sqlglot_q/dialect.py` | `Q(Dialect)`: wires the generator and the reader |
 | `src/sqlglot_q/parser.py` | `QParser`: reads qSQL into sqlglot's tree, right to left; refuses the rest of q |
+| `src/sqlglot_q/windows.py`, `windows_read.py` | window functions as `update ... by` stages, and back |
+| `src/sqlglot_q/temporal.py` | dates, times, timestamps and intervals between the two spellings |
 | `src/sqlglot_q/canonical.py` | one parenthesisation of a tree, applied by both directions so round trips settle |
 | `src/sqlglot_q/generator.py` | `QGenerator`: one `q_<node>` method per sqlglot node; anything else is refused |
 | `src/sqlglot_q/query.py` | SELECT, which in q is several expressions composed (group, having, sort, limit) |
@@ -68,5 +70,16 @@ The plugin is registered in `pyproject.toml` under
 
 ## Releasing
 
-Bump `version` in `pyproject.toml` and `src/sqlglot_q/version.py`, add the
-CHANGELOG entry, run the full verify above (with q), then `uv build`.
+1. Bump `version` in `pyproject.toml` and `src/sqlglot_q/version.py`
+   (`tests/test_version.py` fails when they disagree), and turn the CHANGELOG's
+   `## Unreleased` into `## X.Y.Z`.
+2. Run the full verify above, with q: CI cannot run the integration tests.
+3. `git tag vX.Y.Z && git push origin master vX.Y.Z`. The tag starts
+   `.github/workflows/release.yml`, which checks the tag matches the version,
+   builds, publishes to PyPI by trusted publishing, and makes a GitHub
+   release with the CHANGELOG section as notes.
+
+PyPI has to trust the workflow once, before the first release: on pypi.org,
+Account settings, Publishing, add a pending publisher for project
+`sqlglot-q`, owner `kwojdalski`, repository `sqlglot-q`, workflow
+`release.yml`, environment `pypi`.

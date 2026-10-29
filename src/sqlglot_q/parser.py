@@ -57,6 +57,9 @@ GLYPHS = {
     "and": exp.And,
     "or": exp.Or,
 }
+# q functions with no SQL counterpart outside a window (windows_read.py).
+WINDOW_MONADS = {"sums", "avgs", "maxs", "mins", "differ", "til", "last"}
+WINDOW_DYADS = {"xprev", "msum", "mavg", "mmax", "mmin", "mcount"}
 KEYWORD_DYADS = {
     "and",
     "or",
@@ -73,9 +76,11 @@ KEYWORD_DYADS = {
     "xcol",
     "insert",
     "xbar",
+    *WINDOW_DYADS,
 }
 MONADS = (
-    {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
+    WINDOW_MONADS
+    | {"enlist", "not", "null", "neg", "count", "distinct", "string", "first", "where"}
     | set(AGGREGATES)
     | set(MONADIC)
 )
@@ -382,6 +387,8 @@ class Statement:
             return AGGREGATES[word](this=arg)
         if word in MONADIC:
             return MONADIC[word](this=arg)
+        if word in WINDOW_MONADS:
+            return QCall(this=arg, fn=word)
         if word == "count":
             if isinstance(arg, exp.Column) and arg.name == "i":
                 return exp.Count(this=exp.Star())
@@ -526,6 +533,10 @@ class Statement:
             fn = left.this.this
             if isinstance(fn, exp.Column) and fn.name == "type":
                 return TypedAs(this=right)
+        if op in WINDOW_DYADS:
+            return QCall(this=right, fn=op, n=left)
+        if op == "?" and isinstance(left, exp.Column) and left == right:
+            return QCall(this=right, fn="find")
         if op == "xbar":
             if isinstance(left, exp.Interval):
                 return exp.DateBin(this=left, expression=right)
@@ -650,8 +661,22 @@ class Statement:
         return self.expr(stop | {","})
 
     def update(self, stop: set[str]) -> exp.Expr:
+        items = self.phrase({"by", "from"})
+        keys = []
+        if self.is_("by"):
+            self.next()
+            keys = self.phrase({"from"})
+        self.expect("from")
+        tok = self.peek()
+        if keys or not (tok and tok.kind == "sym" and len(tok.value) == 1):
+            # update ... from a table value returns a new table: the
+            # generator's window stages (windows.py), read back as one.
+            from sqlglot_q.windows_read import window_stage
+
+            return window_stage(self, items, keys, self.expr(stop))
+        self.i -= 1  # back to from, for the statement form below
         sets = []
-        for item in self.phrase({"from"}):
+        for item in items:
             if not isinstance(item, exp.Alias):
                 self.fail("update sets name:value")
             value = item.this
@@ -725,6 +750,13 @@ class Keyed(exp.Expression):
 
 class Joined(exp.Expression):
     arg_types = {"this": True, "expression": True, "keys": True, "side": False, "method": False}
+
+
+class QCall(exp.Expression):
+    """A q function with no SQL counterpart outside a window: sums, til,
+    xprev, msum and so on. windows_read.py turns them into windows."""
+
+    arg_types = {"this": True, "fn": True, "n": False}
 
 
 class Chars(exp.Expression):
@@ -915,7 +947,9 @@ def select(parser, cols, keys, source, where, distinct) -> exp.Select:
         node.set("distinct", exp.Distinct())
     if order is not None:
         node.set("order", order)
-    return node
+    from sqlglot_q.windows_read import fold
+
+    return fold(node)
 
 
 def unalias(node: exp.Expr) -> exp.Expr:
@@ -1013,6 +1047,7 @@ def inserted(parser: Statement, table: exp.Expr, values: exp.Expr) -> exp.Expr:
 
 
 HELPERS = (
+    QCall,
     Enlisted,
     Chars,
     Rows,

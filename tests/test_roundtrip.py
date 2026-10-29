@@ -29,6 +29,8 @@ from tests.integration.harness import q_binary, run_duckdb, run_q, same
 from tests.integration.test_queries import QUERIES, STATEMENTS, TABLES
 from tests.integration.test_temporal import QUERIES as TEMPORAL
 from tests.integration.test_temporal import TICKS
+from tests.integration.test_windows import DATA as WINDOWED
+from tests.integration.test_windows import QUERIES as WINDOWS
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -60,6 +62,7 @@ SQL = (
         "SELECT a FROM t WHERE b ILIKE 'X%'",
     ]
     + [sql for sql, _ in TEMPORAL]
+    + WINDOWS
 )
 Q_EXAMPLES = statements(FIXTURES / "q_examples.q")
 Q_REFUSED = statements(FIXTURES / "q_refused.q")
@@ -77,12 +80,13 @@ def test_sql_to_q_and_back_settles(sql):
 
 SELECTS = [(sql, ordered) for sql, ordered in QUERIES if sql.startswith(("SELECT", "WITH"))]
 SELECTS += TEMPORAL
+SELECTS += [(sql, "LIMIT" in sql) for sql in WINDOWS]
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
 def test_sql_read_back_from_q_means_the_same(sql, ordered):
     back = to_sql(to_q(sql))
-    tables = TICKS if " trades" in sql else TABLES
+    tables = TICKS if " trades" in sql else WINDOWED if sql in WINDOWS else TABLES
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back
 
 
@@ -120,7 +124,7 @@ RUNNABLE = [q for q in Q_EXAMPLES if " from trades" in q or " from quotes" in q]
 def test_q_back_from_sql_returns_what_the_original_did(q):
     back = to_q(to_sql(q))
     # Tick queries run on the tick tables; the showcase's on its own.
-    tables = TICKS if "time" in q or "day" in q or "aj[" in q else SHOWCASE
+    tables = TICKS if any(w in q for w in ("time", "day", "qty", "aj[")) else SHOWCASE
     before, after = run_q(tables, [q, back])
     if isinstance(before, str):
         pytest.skip(f"q refuses the original too: {before}")

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from sqlglot import exp
 
 from sqlglot_q.generator import NAME, RESERVED, SYMBOL
+from sqlglot_q.windows import chain, has_window
 
 if TYPE_CHECKING:
     from sqlglot_q.generator import QGenerator
@@ -211,6 +212,8 @@ def query(gen: QGenerator, node: exp.Select) -> str:
     if group:
         if star:
             return gen.refuse("SELECT * with GROUP BY has no q translation")
+        if has_window(items):
+            return gen.refuse("a window over a grouped result has no q translation here")
         text, names = grouped(gen, node, items, src, where)
     else:
         if node.args.get("having"):
@@ -220,8 +223,10 @@ def query(gen: QGenerator, node: exp.Select) -> str:
             sort_result, sort_source = order_terms(gen, order, items, names, allow_source=True)
         if sort_source:
             src = f"({sort(sort_source, src)})"
-        columns = "" if star else " " + ", ".join(projection(gen, items))
         distinct = " distinct" if node.args.get("distinct") else ""
+        if has_window(items):
+            return windowed(gen, node, items, src, where, sort_result, sort_source, distinct)
+        columns = "" if star else " " + ", ".join(projection(gen, items))
         text = f"select{distinct}{columns} from {src}{where}"
 
     if group:
@@ -246,6 +251,28 @@ def projection(gen: QGenerator, items: list[exp.Expr]) -> list[str]:
         value = f"{{(count x)#y}}[i;{gen.sql(unalias(item))}]"
         out.append(f"{gen.name(item.alias)}:{value}" if isinstance(item, exp.Alias) else value)
     return out
+
+
+def windowed(gen, node, items, src, where, sort_result, sort_source, distinct) -> str:
+    """A select with window functions: WHERE, then each window as an update
+    stage over what it left, then the projection (windows.py)."""
+    if sort_source:
+        return gen.refuse("ORDER BY a column the windowed result does not include")
+    base = f"select from {src}{where}" if where else src
+    built = chain(gen, items, base)
+    if built is None:
+        return "'unsupported"
+    items, text = built
+    # SELECT *, <window> AS w: the stages are the whole query.
+    star_then_windows = isinstance(items[0], exp.Star) and all(
+        isinstance(i, exp.Column) and i.name not in (base,) for i in items[1:]
+    )
+    if not (star_then_windows and not distinct):
+        columns = " " + ", ".join(projection(gen, items))
+        text = f"select{distinct}{columns} from {wrap(text)}"
+    if sort_result:
+        text = sort(sort_result, text)
+    return limited(gen, node, text)
 
 
 def no_from(gen: QGenerator, items: list[exp.Expr]) -> str:
@@ -432,7 +459,22 @@ def sort(terms: list[tuple[str, bool]], text: str) -> str:
 
 def wrap(text: str) -> str:
     simple = text.replace("_", "").isalnum()
-    return text if simple else f"({text})"
+    return text if simple or enclosed(text) else f"({text})"
+
+
+def enclosed(text: str) -> bool:
+    """Whether the text is one parenthesised group, (...) end to end."""
+    if not (text.startswith("(") and text.endswith(")")):
+        return False
+    depth, in_str = 0, False
+    for i, ch in enumerate(text):
+        if ch == '"' and (i == 0 or text[i - 1] != "\\"):
+            in_str = not in_str
+        elif not in_str:
+            depth += {"(": 1, ")": -1}.get(ch, 0)
+            if depth == 0 and i < len(text) - 1:
+                return False
+    return True
 
 
 def limited(gen: QGenerator, node: exp.Select, text: str) -> str:

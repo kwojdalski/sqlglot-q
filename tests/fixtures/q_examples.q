@@ -83,3 +83,10 @@ select n:count i by 0D01:00 xbar time from trades where day=2024.01.15
 select sym, px, bid from aj[`sym`time;trades;quotes]
 select hi:max px, lo:min px by sym, `year$time from trades
 update px:(type px)$0f from `trades where time<2024.01.15D09:31:00.000000000
+
+/ window functions, as update ... by
+update vwap:(sums px*qty)%sums qty by sym from `time xasc trades
+update n:1+til count i by sym from `time xasc trades
+update chg:px-1 xprev px by sym from `time xasc trades
+update m:3 mavg px by sym from `time xasc trades
+update total:sum qty by sym from trades

@@ -238,6 +238,70 @@ class TestTemporal(Validator):
         self.refuses("SELECT * FROM t ASOF JOIN q USING (sym, time)", "ASOF LEFT JOIN")
 
 
+class TestWindows(Validator):
+    read = "duckdb"
+
+    def validate(self, sql: str, q: str, **opts) -> None:
+        super().validate(sql, q, read="duckdb", **opts)
+
+    def test_whole_partition_is_the_aggregate(self):
+        self.validate(
+            "SELECT g, SUM(x) OVER (PARTITION BY g) AS s FROM t",
+            "select g, s from (update s:sum x by g from t)",
+        )
+
+    def test_running_rows_and_range(self):
+        rows = "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
+        self.validate(
+            f"SELECT SUM(x) OVER (PARTITION BY g ORDER BY o {rows}) AS s FROM t",
+            "select s from (update s:sums x by g from (`o xasc t))",
+        )
+        # The default frame is RANGE: rows tied on o share the last value.
+        self.validate(
+            "SELECT SUM(x) OVER (PARTITION BY g ORDER BY o) AS s FROM t",
+            "select s from (update s:last s by g,o from (update s:sums x by g from (`o xasc t)))",
+        )
+
+    def test_ranking_offsets_and_moving(self):
+        self.validate(
+            "SELECT ROW_NUMBER() OVER (PARTITION BY g ORDER BY o) AS n FROM t",
+            "select n from (update n:1+til count i by g from (`o xasc t))",
+        )
+        self.validate(
+            "SELECT RANK() OVER (ORDER BY o DESC) AS r FROM t",
+            "select r from (update r:1+o?o from (`o xdesc t))",
+        )
+        self.validate(
+            "SELECT LEAD(x, 2) OVER (ORDER BY o) AS n FROM t",
+            "select n from (update n:-2 xprev x from (`o xasc t))",
+        )
+        self.validate(
+            "SELECT AVG(x) OVER (ORDER BY o ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS m FROM t",
+            "select m from (update m:3 mavg x from (`o xasc t))",
+        )
+
+    def test_where_runs_first(self):
+        self.validate(
+            "SELECT SUM(x) OVER (PARTITION BY g) AS s FROM t WHERE x > 1",
+            "select s from (update s:sum x by g from (select from t where x>1))",
+        )
+
+    def test_reading_back(self):
+        sql = sqlglot.parse_one("update s:sums x by g from `o xasc t", read="q").sql("duckdb")
+        self.assertEqual(
+            sql,
+            "SELECT *, SUM(x) OVER (PARTITION BY g ORDER BY o ASC "
+            "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM t",
+        )
+
+    def test_refusals(self):
+        self.refuses("SELECT LAG(x, 1, 0) OVER (ORDER BY o) FROM t", "default")
+        self.refuses(
+            "SELECT SUM(x) OVER (ORDER BY o ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t",
+            "current row",
+        )
+
+
 class TestStatements(Validator):
     def test_insert(self):
         self.validate("INSERT INTO t VALUES (1, 'x')", "`t insert (1;`x)")

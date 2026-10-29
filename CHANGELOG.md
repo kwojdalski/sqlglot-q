@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+Added, both directions:
+
+- Window functions: aggregates over a partition, running (`ROWS` and the
+  default `RANGE`) and sliding frames, `ROW_NUMBER`, `RANK`, `DENSE_RANK`,
+  `LAG` and `LEAD`, as `update ... by` stages; hand-written stages such as
+  `update vwap:(sums px*qty)%sums qty by sym from ...` read back as windows.
+- A release workflow: a `vX.Y.Z` tag publishes to PyPI by trusted publishing
+  and makes a GitHub release.
+
 Added, both directions, each checked in q 5 against DuckDB:
 
 - Dates, timestamps and times: `DATE '2024-01-15'` is `2024.01.15`, fixed
