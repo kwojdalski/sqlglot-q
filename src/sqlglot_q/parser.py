@@ -104,6 +104,8 @@ from sqlglot_q.generator import (
     TRUNC,
     TRY_PARSE,
     TUPLE_IN,
+    TYPED_COLUMNS,
+    TYPED_ROW,
     TYPES,
     UNIX_SCALES,
     UNIX_TIME,
@@ -874,6 +876,15 @@ class Statement:
                 parts = [literal(self.expr(stop))]
             sep = exp.Literal.string(str(toks[0].value))
             return exp.ConcatWs(expressions=[sep, *parts], safe=True, coalesce=True)
+        if text in (TYPED_ROW, TYPED_COLUMNS) and self.is_("["):
+            # An insert's values cast to the target's types: SQL's INSERT
+            # casts them itself.
+            self.expect("[")
+            self.expr(set())
+            self.expect(";")
+            values = self.expr(set())
+            self.expect("]")
+            return values
         if text == UNIX_TIME and self.is_("["):
             self.expect("[")
             unit = self.expr(set())

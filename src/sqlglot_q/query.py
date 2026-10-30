@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from sqlglot import exp
 
-from sqlglot_q.generator import NAME, RESERVED, SYMBOL
+from sqlglot_q.generator import NAME, RESERVED, SYMBOL, is_text
 from sqlglot_q.windows import chain, has_window
 
 if TYPE_CHECKING:
@@ -418,6 +418,32 @@ def projection(gen: QGenerator, items: list[exp.Expr]) -> list[str]:
     """The select phrase. SELECT 1 AS one FROM t has a row per row of t, but
     a q select whose columns are all atoms is refused ('rank), so then each
     constant is spread over the rows: q 5 runs {(count x)#y}[i;1] per row."""
+    from sqlglot_q.generator import constant  # noqa: I001
+
+    rowwise = any(
+        c.find_ancestor(exp.AggFunc, exp.Subquery, exp.Window) is None
+        for i in items
+        for c in i.find_all(exp.Column, exp.Star)
+    )
+    if not rowwise and any(i.find(exp.AggFunc) for i in items):
+        # One row of aggregates: a constant beside them is one value, but a
+        # bare atom first is 'rank (select a:1, m:max n), so first of it.
+        out = []
+        for item in items:
+            value = unalias(item)
+            if (isinstance(value, exp.Literal) or constant(value)) and not value.find(exp.AggFunc):
+                text = gen.sql(value)
+                text = (
+                    f"first enlist {text}"
+                    if not gen.symbols and is_text(value)
+                    else (f"first {gen.operand_text(value, text)}")
+                )
+                out.append(
+                    f"{gen.name(item.alias)}:{text}" if isinstance(item, exp.Alias) else text
+                )
+            else:
+                out.append(gen.sql(item))
+        return out
     if any(i.find(exp.Column, exp.AggFunc, exp.Star) for i in items):
         if gen.symbols:
             return [gen.sql(i) for i in items]

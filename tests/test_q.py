@@ -363,11 +363,18 @@ class TestWindows(Validator):
 
 class TestStatements(Validator):
     def test_insert(self):
-        self.validate("INSERT INTO t VALUES (1, 'x')", "`t insert (1;`x)")
-        self.validate("INSERT INTO t VALUES (1, 'x'), (2, 'y')", "`t insert (1 2;`x`y)")
+        # A number is cast to its column's type, as SQL's INSERT casts it.
+        from sqlglot_q.generator import TYPED_COLUMNS, TYPED_ROW
+
+        self.validate("INSERT INTO t VALUES (1, 'x')", f"`t insert {TYPED_ROW}[`t;(1;`x)]")
         self.validate(
-            "INSERT INTO t (a, b) VALUES (1, 'x'), (2, 'y')", "`t insert ([] a:1 2;b:`x`y)"
+            "INSERT INTO t VALUES (1, 'x'), (2, 'y')", f"`t insert {TYPED_ROW}[`t;(1 2;`x`y)]"
         )
+        self.validate(
+            "INSERT INTO t (a, b) VALUES (1, 'x'), (2, 'y')",
+            f"`t insert {TYPED_COLUMNS}[`t;([] a:1 2;b:`x`y)]",
+        )
+        self.validate("INSERT INTO t VALUES ('x', 'y')", "`t insert (`x;`y)")
 
     def test_update_and_delete(self):
         self.validate("UPDATE t SET a = 1", "update a:(type a)$1 from `t")

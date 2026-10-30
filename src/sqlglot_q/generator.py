@@ -145,6 +145,12 @@ UNIX_TIME = (
     "1970.01.01D+s*`long$x]}"
 )
 UNIX_SCALES = {"3": 1000000, "6": 1000}
+# INSERT's values cast to the target's column types, as SQL's INSERT casts
+# them (1.9 into a BIGINT is 2, 1 into a DOUBLE 1.0), where q's insert raises
+# 'type: a row by position, or a table of the columns named.
+_TO_TYPE = "{$[(type x) within 1 19h;(type x)$y;y]}"
+TYPED_ROW = f"{{c:value flip 0!0#get x;{_TO_TYPE}'[c;y]}}"
+TYPED_COLUMNS = f"{{c:(0!0#get x) cols y;flip (cols y)!{_TO_TYPE}'[c;value flip y]}}"
 # TIME_BUCKET of n months: q counts months from 2000.01, DuckDB's own origin
 # for them; a date's bucket is a date, a timestamp's a timestamp.
 # (xbar of a null month is month 0, 2000.01: a null stays one.)
@@ -1812,14 +1818,26 @@ class QGenerator(Generator):
 
             width = len(columns) if columns else len(rows[0])
             cells = [cell(i) for i in range(width)]
+            typed = any(
+                not (is_text(v) or isinstance(v, (exp.Null, exp.Boolean)))
+                for row in rows
+                for v in row
+            )
             if width == 1 and len(rows) > 1 and not columns:
                 # One column of several rows: (1 2) would be a row of two.
-                return f"{table} {verb} enlist {cells[0]}"
+                payload = f"enlist {cells[0]}"
+                if typed:
+                    return f"{table} {verb} {TYPED_ROW}[{table};{payload}]"
+                return f"{table} {verb} {payload}"
             if columns:
                 body = ";".join(f"{c}:{v}" for c, v in zip(columns, cells, strict=True))
                 if len(rows) == 1:
                     body = ";".join(f"{c}:enlist {v}" for c, v in zip(columns, cells, strict=True))
+                if typed:
+                    return f"{table} {verb} {TYPED_COLUMNS}[{table};([] {body})]"
                 return f"{table} {verb} ([] {body})"
+            if typed:
+                return f"{table} {verb} {TYPED_ROW}[{table};({';'.join(cells)})]"
             return f"{table} {verb} ({';'.join(cells)})"
         # SQL inserts by position (or into the columns listed): the query's
         # columns renamed to the target's, as q's insert matches names.
@@ -1903,6 +1921,15 @@ class QGenerator(Generator):
             if kind is None or kind.this not in TYPES:
                 return self.refuse("ALTER TABLE ADD COLUMN needs a type q has")
             return f"update {self.name(action.name)}:first {TYPES[kind.this][1]} from `{name}"
+        if isinstance(action, exp.AlterColumn) and action.args.get("dtype") is not None:
+            if any(action.args.get(k) for k in ("using", "default", "drop", "allow_null")):
+                return self.refuse("ALTER COLUMN is translated for its type alone")
+            # ALTER COLUMN c TYPE T: each value cast, as CAST(c AS T).
+            column = exp.column(action.this.name)
+            cast = self.sql(exp.Cast(this=column, to=action.args["dtype"].copy()))
+            if cast.startswith("'"):
+                return cast
+            return f"update {self.name(action.this.name)}:{cast} from `{name}"
         if isinstance(action, exp.RenameColumn):
             old, new = self.name(action.this.name), self.name(action.args["to"].name)
             return f"`{name} set @[cols {name};where (cols {name})=`{old};:;`{new}] xcol {name}"

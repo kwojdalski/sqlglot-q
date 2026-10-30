@@ -90,6 +90,11 @@ QUERIES = [
     # FIRST/LAST with ORDER BY over a whole partition.
     "SELECT g, n, FIRST(n ORDER BY x) OVER (PARTITION BY g) AS f FROM t",
     "SELECT g, n, LAST(s ORDER BY o DESC) OVER () AS f FROM t",
+    # A constant beside aggregates: a bare atom first was 'rank.
+    "SELECT 'z' AS g, COUNT(*) AS v FROM t",
+    "SELECT 'z', COUNT(*) FROM t",
+    "SELECT 1 AS a, MAX(n) AS m FROM t",
+    "SELECT 'z' AS g, MIN(o) AS m, 2.5 AS h, DATE '2024-01-02' AS d FROM t WHERE n > 0",
 ]
 
 REFUSED = [

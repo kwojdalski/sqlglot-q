@@ -51,6 +51,31 @@ CASES = [
     ),
     ("ALTER TABLE t DROP COLUMN s", "SELECT * FROM t"),
     ("ALTER TABLE u RENAME TO uu", "SELECT g, v FROM uu"),
+    # INSERT casts its values to the columns' types, where q's raised 'type.
+    ("INSERT INTO u VALUES ('x', 1.9)", "SELECT g, v FROM u"),
+    ("INSERT INTO u VALUES ('x', 1.9), ('y', 2.5)", "SELECT g, v FROM u"),
+    ("INSERT INTO u (v, g) VALUES (2.5, 'q')", "SELECT g, v FROM u"),
+    (
+        "CREATE TABLE w (a INTEGER NOT NULL, b DOUBLE); INSERT INTO w VALUES (1, 2)",
+        "SELECT a, b FROM w",
+    ),
+    (
+        "CREATE TABLE w (a DATE, b TIMESTAMP); "
+        "INSERT INTO w VALUES (DATE '2024-01-02', DATE '2024-01-03')",
+        "SELECT a, b FROM w",
+    ),
+    (
+        "CREATE TABLE w (k BIGINT PRIMARY KEY, c DOUBLE); INSERT INTO w VALUES (1, NULL), "
+        "(2.0, 3); INSERT OR REPLACE INTO w VALUES (1, 7)",
+        "SELECT k, c FROM w",
+    ),
+    ("INSERT INTO u SELECT 'z', COUNT(*) FROM t", "SELECT g, v FROM u"),
+    # ALTER COLUMN ... TYPE: each value cast.
+    ("ALTER TABLE u ALTER COLUMN v TYPE DOUBLE", "SELECT g, v FROM u"),
+    ("ALTER TABLE u ALTER COLUMN v SET DATA TYPE VARCHAR", "SELECT g, v FROM u"),
+    ("ALTER TABLE t ALTER COLUMN x TYPE BIGINT", "SELECT g, x FROM t"),
+    ("ALTER TABLE t ALTER COLUMN n TYPE DOUBLE; UPDATE t SET n = n / 4", "SELECT g, n FROM t"),
+    ("ALTER TABLE t ALTER COLUMN d TYPE TIMESTAMP", "SELECT g, d FROM t"),
     # IF NOT EXISTS keeps an existing table; a view is q's view.
     ("CREATE TABLE IF NOT EXISTS u (g VARCHAR, v BIGINT)", "SELECT g, v FROM u"),
     ("CREATE TABLE IF NOT EXISTS w (a BIGINT); INSERT INTO w VALUES (1)", "SELECT a FROM w"),
@@ -122,6 +147,8 @@ STRING_CASES = [
         "SELECT a, z FROM s",
     ),
     ("DELETE FROM s WHERE w IS NULL", "SELECT a, w FROM s"),
+    ("ALTER TABLE s ALTER COLUMN a TYPE VARCHAR", "SELECT a, w FROM s"),
+    ("INSERT INTO s (a, w) VALUES (1.6, 'q')", "SELECT a, w FROM s"),
     ("ALTER TABLE s ADD COLUMN z VARCHAR DEFAULT 'hi'", "SELECT a, z FROM s"),
     (
         "ALTER TABLE s ADD COLUMN z VARCHAR DEFAULT 'h'; UPDATE s SET z = w WHERE a > 3",
