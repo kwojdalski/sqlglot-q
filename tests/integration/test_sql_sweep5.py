@@ -81,6 +81,12 @@ QUERIES = [
     "SELECT COUNT(*) AS c FROM t HAVING COUNT(*) > 30",
     "SELECT SUM(n) AS s, MAX(x) AS m FROM t WHERE o > 1 HAVING MIN(n) < 0",
     "SELECT AVG(n) AS a FROM t WHERE n > 100 HAVING COUNT(*) = 0",
+    # FIRST and LAST with ORDER BY: of the values in that order.
+    "SELECT g, FIRST(n ORDER BY x) AS f, LAST(s ORDER BY o NULLS FIRST) AS l FROM t GROUP BY g",
+    "SELECT g, FIRST(x ORDER BY n DESC) AS f FROM t GROUP BY g",
+    # TIME_BUCKET of months: q's months count from 2000.01, DuckDB's origin.
+    "SELECT g, d, TIME_BUCKET(INTERVAL '2 months', d) AS b FROM t",
+    "SELECT g, TIME_BUCKET(INTERVAL '1 year 6 months', d) AS b, COUNT(*) AS c FROM t GROUP BY g, b",
 ]
 
 REFUSED = [
@@ -89,10 +95,27 @@ REFUSED = [
     # DuckDB orders a row's NULL above every value, (NULL, 1) > (2, 1) being
     # true, where the standard's is unknown: which is meant is not known.
     "SELECT g FROM t WHERE (n, o) > (2, 1)",
+    # A TIMESTAMP WITH TIME ZONE.
+    "SELECT TO_TIMESTAMP(1705311000) AS t",
 ]
 
 # On trades and quotes.
-TICK_QUERIES: list[str] = []
+TICK_QUERIES = [
+    "SELECT sym, FIRST(px ORDER BY time) AS o, LAST(px ORDER BY time) AS c FROM trades "
+    "GROUP BY sym",
+    "SELECT sym, FIRST(px ORDER BY time DESC) AS c FROM trades GROUP BY sym",
+    "SELECT FIRST(qty ORDER BY px) AS a, LAST(sym ORDER BY qty DESC) AS b FROM trades",
+    "SELECT sym, TIME_BUCKET(INTERVAL '1 month', time) AS d FROM trades",
+    "SELECT sym, TIME_BUCKET(INTERVAL '3 months', day) AS d, SUM(qty) AS q FROM trades "
+    "GROUP BY sym, d",
+    "SELECT sym, TIME_BUCKET(INTERVAL 1 YEAR, time) AS d FROM trades",
+    # EPOCH_MS of a count is a timestamp, of a timestamp (or date) its count:
+    # DuckDB's two overloads, which q tells apart by the value's type.
+    "SELECT sym, EPOCH_MS(time) AS e FROM trades",
+    "SELECT sym, EPOCH_MS(day) AS e FROM trades",
+    "SELECT sym, EPOCH_MS(EPOCH_MS(time) + 1000) AS t2 FROM trades",
+    "SELECT sym, MAKE_TIMESTAMP(qty * 1000000) AS t2 FROM trades",
+]
 
 ONE_WAY: set[str] = set()
 

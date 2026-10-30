@@ -89,6 +89,26 @@ def nanoseconds(node: exp.Interval) -> int | None:
     return int(ns) if ns == int(ns) else None
 
 
+def months_of(node: exp.Interval) -> int | None:
+    """A whole number of months or years, as months: INTERVAL '3 months',
+    INTERVAL 1 YEAR, '1 year 6 months'."""
+    text = node.this.name if isinstance(node.this, exp.Literal) else None
+    if text is None:
+        return None
+    unit = node.text("unit")
+    spec = f"{text} {unit}" if unit else text
+    parts = re.findall(r"(\d+)\s*([A-Za-z]+)", spec)
+    if not parts or re.sub(r"(\d+)\s*([A-Za-z]+)", "", spec).strip():
+        return None
+    total = 0
+    for count, name in parts:
+        name = name.upper().rstrip("S")
+        if name not in ("MONTH", "YEAR"):
+            return None
+        total += int(count) * (12 if name == "YEAR" else 1)
+    return total or None
+
+
 def span_text(ns: int) -> str:
     days, rest = divmod(ns, DAY)
     hours, rest = divmod(rest, UNITS["HOUR"])

@@ -137,6 +137,18 @@ TRY_PARSE = '{$[11h=abs t:type x;"L"$string x;0h=t;"L"$x;"L"$string x]}'
 # TIME_BUCKET: x xbar y, but a date (of a width dividing a day) as it is.
 BUCKET = "{$[14h=abs type y;y;x xbar y]}"
 BUCKET_FROM = "{[w;x;o] o+w xbar (`timestamp$x)-o}"
+# EPOCH_MS(x) (s, nanoseconds a unit, 1000000) and MAKE_TIMESTAMP(micros)
+# (1000): a count since 1970 as a timestamp; and EPOCH_MS of a timestamp or a
+# date, which DuckDB's overload is too, its count, floored.
+UNIX_TIME = (
+    "{[s;x] $[(abs type x) in 12 14h;(`long$(`timestamp$x)-1970.01.01D) div s;"
+    "1970.01.01D+s*`long$x]}"
+)
+UNIX_SCALES = {"3": 1000000, "6": 1000}
+# TIME_BUCKET of n months: q counts months from 2000.01, DuckDB's own origin
+# for them; a date's bucket is a date, a timestamp's a timestamp.
+# (xbar of a null month is month 0, 2000.01: a null stays one.)
+BUCKET_MONTHS = '{r:`date$?[null m;0Nm;x xbar m:`month$y];$[14h=abs type y;r;"p"$r]}'
 # String mode, where a column's type is not known: strings (and a string)
 # as symbols, which compare in text order; anything else as it is. And
 # COALESCE of two columns: the text fill for strings, ^ for the rest.
@@ -1197,10 +1209,15 @@ class QGenerator(Generator):
 
     def first_sql(self, node: exp.First) -> str:
         # FIRST and LAST (DuckDB's): the first and last row's value, in the
-        # table's order, nulls and all: q's first and last.
+        # table's order, nulls and all: q's first and last; with ORDER BY, of
+        # the values in that order.
+        if isinstance(node.this, exp.Order):
+            return f"first {self.aggregated(node.this)}"
         return f"first {self.operand(node.this)}"
 
     def last_sql(self, node: exp.Last) -> str:
+        if isinstance(node.this, exp.Order):
+            return f"last {self.aggregated(node.this)}"
         return f"last {self.operand(node.this)}"
 
     def arrayagg_sql(self, node: exp.ArrayAgg) -> str:
@@ -1460,6 +1477,14 @@ class QGenerator(Generator):
     year_sql = month_sql = day_sql = hour_sql = minute_sql = second_sql = date_part
     dayofmonth_sql = date_part
 
+    def unixtotime_sql(self, node: exp.UnixToTime) -> str:
+        scale = node.args.get("scale")
+        unit = UNIX_SCALES.get(scale.name) if isinstance(scale, exp.Literal) else None
+        if unit is None or node.args.get("zone"):
+            # TO_TIMESTAMP(seconds) is a TIMESTAMP WITH TIME ZONE: q has none.
+            return self.refuse("TO_TIMESTAMP of seconds has no q translation; use EPOCH_MS")
+        return f"{UNIX_TIME}[{unit};{self.sql(node.this)}]"
+
     def datebin_sql(self, node: exp.DateBin) -> str:
         from sqlglot_q.temporal import DAY, nanoseconds
 
@@ -1476,6 +1501,11 @@ class QGenerator(Generator):
             return f"{BUCKET_FROM}[{';'.join(args)}]"
         if origin is not None:
             return self.refuse("TIME_BUCKET with an origin or offset has no q xbar")
+        from sqlglot_q.temporal import months_of
+
+        months = months_of(width) if isinstance(width, exp.Interval) else None
+        if months is not None:
+            return f"{BUCKET_MONTHS}[{months};{self.sql(node.expression)}]"
         ns = nanoseconds(width) if isinstance(width, exp.Interval) else None
         if ns is None or DAY % ns:
             # q counts buckets from 2000.01.01, DuckDB from 2000-01-03: they

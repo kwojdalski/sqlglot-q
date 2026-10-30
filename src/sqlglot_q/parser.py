@@ -30,6 +30,7 @@ from sqlglot_q.generator import (
     BOOL_OR,
     BUCKET,
     BUCKET_FROM,
+    BUCKET_MONTHS,
     COUNT_ROWS,
     CUME_DIST,
     DOW,
@@ -104,6 +105,8 @@ from sqlglot_q.generator import (
     TRY_PARSE,
     TUPLE_IN,
     TYPES,
+    UNIX_SCALES,
+    UNIX_TIME,
 )
 from sqlglot_q.temporal import CASTS as PART_CASTS
 from sqlglot_q.temporal import interval, span_nanoseconds
@@ -871,6 +874,27 @@ class Statement:
                 parts = [literal(self.expr(stop))]
             sep = exp.Literal.string(str(toks[0].value))
             return exp.ConcatWs(expressions=[sep, *parts], safe=True, coalesce=True)
+        if text == UNIX_TIME and self.is_("["):
+            self.expect("[")
+            unit = self.expr(set())
+            self.expect(";")
+            value = self.expr(set())
+            self.expect("]")
+            scales = {str(v): k for k, v in UNIX_SCALES.items()}
+            if not (isinstance(unit, exp.Literal) and unit.name in scales):
+                self.fail("an epoch lambda is read with the generator's unit")
+            scale = exp.Literal.number(int(scales[unit.name]))
+            return exp.UnixToTime(this=literal(value), scale=scale)
+        if text == BUCKET_MONTHS and self.is_("["):
+            self.expect("[")
+            count = self.expr(set())
+            self.expect(";")
+            value = self.expr(set())
+            self.expect("]")
+            if not (isinstance(count, exp.Literal) and count.name.isdigit()):
+                self.fail("a month bucket is read with a literal count")
+            width = exp.Interval(this=exp.Literal.string(count.name), unit=exp.var("MONTH"))
+            return exp.DateBin(this=width, expression=value)
         if text == BUCKET_FROM and self.is_("["):
             self.expect("[")
             width = self.expr(set())
