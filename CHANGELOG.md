@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
+
+The first release on PyPI. Everything below 0.1.0's notes is in it, and a
+fourth sweep (`tests/integration/test_sql_sweep4.py`, `test_statements.py`,
+`test_string_mode.py`):
+
+Wrong answers, silently:
+
+- An `ASOF` join on `t.time >= q.time` dropped the quotes' `time`.
+- `GROUP BY` items computed from the keys (`SELECT g, UPPER(g) ... GROUP BY
+  g`) were each group's list, not its one value.
+- String mode: a running `MIN` or `MAX` of text gave each string's first
+  character.
+- `ALTER TABLE ... ADD COLUMN c T DEFAULT v` left `c` null; it is now `v`. A
+  `DEFAULT` in `CREATE TABLE` has no q form and is refused.
+
+Refused, now translated: `RANGE BETWEEN INTERVAL n PRECEDING AND CURRENT ROW`
+over a time, `TIME_BUCKET` from an origin, `EXTRACT(epoch FROM` an interval
+`)`, a join's `ON` of a key and two or more other conditions, a `LEFT JOIN`'s
+condition on its right side alone, and `SEMI`/`ANTI JOIN`.
+
+Reading q: `select[n;>c]` (and `select[m n;<c]`, `select[>c]`), and the
+generator's `CONCAT_WS`, in either mode.
 
 A third sweep of 50 problems (`tests/integration/test_sql_sweep3.py`,
 `test_statements.py`, `test_string_mode.py`, `tests/test_cli.py`).

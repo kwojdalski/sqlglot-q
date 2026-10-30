@@ -33,7 +33,7 @@ back settles: after one round trip, another changes nothing.
 pip install sqlglot sqlglot-q      # or: uv add sqlglot sqlglot-q
 ```
 
-Until the first PyPI release, or for the latest commit, install from GitHub:
+For the latest commit, install from GitHub:
 
 ```sh
 pip install sqlglot "sqlglot-q @ git+https://github.com/kwojdalski/sqlglot-q"

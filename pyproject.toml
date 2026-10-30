@@ -1,6 +1,6 @@
 [project]
 name = "sqlglot-q"
-version = "0.1.0"
+version = "0.2.0"
 description = "SQL to q/kdb+: a sqlglot dialect plugin that writes qSQL"
 readme = "README.md"
 authors = [
