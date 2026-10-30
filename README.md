@@ -189,6 +189,10 @@ sqlglot-q "SELECT a FROM t WHERE b IN ('x', 'y')"
 # select a from t where b in `x`y
 echo "SELECT TOP 5 a FROM t" | sqlglot-q --read tsql
 # 5 sublist (select a from t)
+sqlglot-q --from-q "select avg px by sym from trades"
+# SELECT sym, AVG(px) FROM trades GROUP BY sym
+sqlglot-q --from-q --write postgres "select n:count i by g from t"
+python -m sqlglot_q "SELECT a FROM t"   # the same command
 ```
 
 ## Development
