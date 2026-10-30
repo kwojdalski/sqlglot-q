@@ -60,6 +60,35 @@ QUERIES = [
     "SELECT g, CONCAT_WS('-', s, x, d) AS a FROM t",
     "SELECT g, CONCAT(s, 2.5) AS a FROM t",
     "SELECT g, CONCAT(s, o > 2) AS a FROM t",
+    # ORDER BY an unnamed item: q names it, so the sort is on its position.
+    "SELECT g, COUNT(*) FROM t GROUP BY g ORDER BY COUNT(*) DESC, g",
+    "SELECT g, MAX(n) FROM t GROUP BY g ORDER BY 2",
+    "SELECT g, n + 1 FROM t ORDER BY n + 1 DESC",
+    "SELECT COUNT(*), g FROM t GROUP BY g ORDER BY 1, 2",
+    "SELECT g, SUM(x) FROM t GROUP BY g ORDER BY 2 NULLS FIRST",
+    "SELECT g, SUM(n) FROM t GROUP BY g ORDER BY SUM(n) DESC LIMIT 2",
+    "SELECT g, ABS(n) FROM t ORDER BY 2, 1",
+    # A CTE's or a derived table's column list renames its columns.
+    "WITH r(k) AS (SELECT 1) SELECT k FROM r",
+    "WITH r(a, b) AS (SELECT g, n FROM t) SELECT a, b FROM r WHERE b > 1",
+    "WITH r(a) AS (SELECT g FROM t) SELECT * FROM r",
+    "SELECT a, b FROM (SELECT g, n FROM t) AS r(a, b) WHERE b > 1",
+    "WITH r(a) AS (SELECT * FROM u) SELECT a FROM r",
+    "WITH r(k, c) AS (SELECT g, COUNT(*) FROM t GROUP BY g) SELECT k, c FROM r WHERE c > 1",
+    "WITH r(z) AS (SELECT g FROM t UNION SELECT g FROM u) SELECT z FROM r",
+    # HAVING without GROUP BY: the one aggregate row, filtered.
+    "SELECT COUNT(*) AS c FROM t HAVING COUNT(*) > 3",
+    "SELECT COUNT(*) AS c FROM t HAVING COUNT(*) > 30",
+    "SELECT SUM(n) AS s, MAX(x) AS m FROM t WHERE o > 1 HAVING MIN(n) < 0",
+    "SELECT AVG(n) AS a FROM t WHERE n > 100 HAVING COUNT(*) = 0",
+]
+
+REFUSED = [
+    # A query that reads its own rows as they are made.
+    "WITH RECURSIVE r(k) AS (SELECT 1 UNION ALL SELECT k + 1 FROM r WHERE k < 3) SELECT k FROM r",
+    # DuckDB orders a row's NULL above every value, (NULL, 1) > (2, 1) being
+    # true, where the standard's is unknown: which is meant is not known.
+    "SELECT g FROM t WHERE (n, o) > (2, 1)",
 ]
 
 # On trades and quotes.
@@ -84,3 +113,9 @@ def test_q_returns_what_duckdb_returns(answers, sql):
     assert not isinstance(got, str), f"q refused {q}: {got}"
     ordered = bool(sqlglot.parse_one(sql, read="duckdb").args.get("order"))
     assert same(got, expected, ordered), f"{q}\nq:      {got}\nduckdb: {expected}"
+
+
+@pytest.mark.parametrize("sql", REFUSED, ids=REFUSED)
+def test_what_q_cannot_match_is_refused(sql):
+    with pytest.raises(sqlglot.errors.UnsupportedError):
+        sqlglot.transpile(sql, read="duckdb", write="q")

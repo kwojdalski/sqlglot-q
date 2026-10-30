@@ -41,22 +41,34 @@ def inline_ctes(node: exp.Select) -> exp.Select:
     with_ = node.args.get("with_")
     if not with_:
         return node
+    if with_.args.get("recursive"):
+        from sqlglot.errors import UnsupportedError
+
+        # Its query reads its own rows as they are made: q's select has no
+        # such loop, and the CTE would be a name q does not have.
+        raise UnsupportedError("WITH RECURSIVE has no q translation")
     node = node.copy()
     ctes = {}
     for cte in node.args["with_"].expressions:
         query = cte.this
-        for name, body in ctes.items():
-            query = substitute(query, name, body)
-        ctes[cte.alias] = query
+        for name, (body, cols) in ctes.items():
+            query = substitute(query, name, body, cols)
+        ctes[cte.alias] = (query, cte.args["alias"].columns)
     node.set("with_", None)
-    for name, body in ctes.items():
-        node = substitute(node, name, body)
+    for name, (body, cols) in ctes.items():
+        node = substitute(node, name, body, cols)
     return node
 
 
-def substitute(node: exp.Expr, name: str, body: exp.Expr) -> exp.Expr:
+def substitute(node: exp.Expr, name: str, body: exp.Expr, columns=None) -> exp.Expr:
     def swap(n: exp.Expr) -> exp.Expr:
         if isinstance(n, exp.Table) and n.name == name and not n.args.get("db"):
+            if columns:
+                # WITH c(a, b) AS (...): its columns renamed, in order.
+                alias = exp.TableAlias(
+                    this=exp.to_identifier(n.alias_or_name), columns=[c.copy() for c in columns]
+                )
+                return exp.Subquery(this=body.copy(), alias=alias)
             return exp.Subquery(this=body.copy())
         return n
 
@@ -665,8 +677,8 @@ def order_terms(
         if target in items:
             name = names[items.index(target)]
             if name is None:
-                gen.refuse("ORDER BY an unnamed expression: give it an alias")
-                return [], []
+                # q names it itself: sorted on as the result's k-th column.
+                name = f"#{items.index(target)}"
             terms.append((name, desc, nulls, True))
         elif isinstance(target, exp.Column) and target.name in names:
             terms.append((target.name, desc, nulls, True))
@@ -680,7 +692,10 @@ def order_terms(
             gen.refuse("ORDER BY is only translated for columns, aliases and positions")
             return [], []
     if all(t[3] for t in terms):
-        return [(gen.name(n), d, f) for n, d, f, _ in terms], []
+        return [(n if n.startswith("#") else gen.name(n), d, f) for n, d, f, _ in terms], []
+    if any(n.startswith("#") for n, *_ in terms):
+        gen.refuse("ORDER BY an unnamed expression and a column the result lacks: alias it")
+        return [], []
     if allow_source:
         # A select keeps its source's order, so sorting the table first sorts
         # the result by columns the result does not include.
@@ -716,12 +731,29 @@ def sort(terms: list[tuple], text: str, gen=None) -> str:
     runs: list[tuple[list[str], bool, str | None]] = []
     for name, desc, *rest in terms:
         fix = rest[0] if rest else None
-        if runs and runs[-1][1] == desc and runs[-1][2] is None and fix is None:
+        position = name.startswith("#") or (runs and runs[-1][0][-1].startswith("#"))
+        if runs and runs[-1][1] == desc and runs[-1][2] is None and fix is None and not position:
             runs[-1][0].append(name)
         else:
             runs.append(([name], desc, fix))
     strings = gen is not None and not gen.symbols
     for cols, desc, fix in reversed(runs):
+        if cols[0].startswith("#"):
+            # An unnamed column, by its position k: (cols x) k is its name.
+            from sqlglot_q.generator import TEXT_KEY, TEXT_NULL
+
+            column = f"x (cols x) {cols[0][1:]}"
+            if strings:
+                grade = "idesc" if desc else "iasc"
+                text = f"{{x {grade} {TEXT_KEY} {column}}} {wrap(text)}"
+            else:
+                verb = "xdesc" if desc else "xasc"
+                text = f"{{((cols x) {cols[0][1:]}) {verb} x}} {wrap(text)}"
+            if fix:
+                grade = "iasc" if fix == "last" else "idesc"
+                null = TEXT_NULL if strings else "null"
+                text = f"{{x {grade} {null} {column}}} ({text})"
+            continue
         if strings:
             # A list of strings does not sort in text order; its symbols do.
             from sqlglot_q.generator import TEXT_KEY, TEXT_NULL

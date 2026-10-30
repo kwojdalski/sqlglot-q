@@ -1691,8 +1691,31 @@ class QGenerator(Generator):
 
     def operand_query(self, node: exp.Expr) -> str:
         """A query used as a table: FROM (...), a join side, a UNION operand."""
+        columns = []
         if isinstance(node, exp.Subquery):
+            alias = node.args.get("alias")
+            columns = alias.columns if alias is not None else []
             node = node.this
+        if (
+            columns
+            and isinstance(node, exp.Select)
+            and not any(isinstance(i, exp.Star) for i in node.expressions)
+        ):
+            # FROM (...) AS r(a, b): its first items, renamed.
+            if len(columns) > len(node.expressions):
+                return self.refuse("a column list longer than its query's columns")
+            node = node.copy()
+            for item, name in zip(node.expressions, columns, strict=False):
+                item.replace(exp.alias_(unalias(item).copy(), name.name, quoted=True))
+            text = self.sql(node)
+            from sqlglot_q.query import enclosed
+
+            return text if enclosed(text) else f"({text})"
+        if columns:
+            # Of a query whose columns are not written out: xcol renames its
+            # first ones, in order.
+            names = "".join(f"`{self.name(c.name)}" for c in columns)
+            return f"({names} xcol {self.operand_query(node)})"
         return f"({self.sql(node)})"
 
     # Statements -----------------------------------------------------------
@@ -2238,6 +2261,7 @@ def _select_rewrites():
         correlated_scalars,
         expand_group_by_all,
         grouping_sets,
+        having_alone,
         join_conditions,
         like_any,
         named_windows,
@@ -2267,6 +2291,7 @@ def _select_rewrites():
             expand_group_by_all,
             table_star,
             semi_joins,
+            having_alone,
             quantified_in,
             correlated_scalars,
             join_conditions,

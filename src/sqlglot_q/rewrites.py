@@ -184,6 +184,52 @@ def join_conditions(expression: exp.Expr) -> exp.Expr:
     return expression
 
 
+def having_alone(expression: exp.Expr) -> exp.Expr:
+    """HAVING without GROUP BY filters the one row of the aggregates:
+
+        SELECT COUNT(*) AS c FROM t HAVING COUNT(*) > 3
+        SELECT c FROM (SELECT COUNT(*) AS c, COUNT(*) AS q_h0 FROM t) WHERE q_h0 > 3
+
+    each aggregate of the HAVING a hidden column of the aggregate row."""
+    if not isinstance(expression, exp.Select) or expression.args.get("group"):
+        return expression
+    having = expression.args.get("having")
+    if having is None or not expression.args.get("from_"):
+        return expression
+    items = expression.expressions
+    if not all(isinstance(i, exp.Alias) or isinstance(i, exp.Column) for i in items):
+        return expression  # the outer select names each item; refused
+    if having.this.find(exp.Window, exp.Subquery):
+        return expression
+    hidden: list[exp.Expr] = []
+
+    def swap(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, exp.AggFunc) or (
+            isinstance(node, exp.Filter) and isinstance(node.this, exp.AggFunc)
+        ):
+            name = f"q_h{len(hidden)}"
+            hidden.append(exp.alias_(node.copy(), name))
+            return exp.column(name)
+        return node
+
+    cond = having.this.copy().transform(swap)
+    if cond.find(exp.Column) and any(
+        c.name not in {h.alias for h in hidden} for c in cond.find_all(exp.Column)
+    ):
+        return expression  # a column outside an aggregate: q's would be a list
+    inner = expression.copy()
+    inner.set("having", None)
+    for key in ("order", "limit", "offset"):
+        inner.set(key, None)
+    inner.set("expressions", [i.copy() for i in items] + hidden)
+    outer = exp.Select(expressions=[exp.column(i.alias_or_name) for i in items])
+    outer = outer.from_(exp.Subquery(this=inner), copy=False).where(cond, copy=False)
+    for key in ("order", "limit", "offset"):
+        if expression.args.get(key):
+            outer.set(key, expression.args[key].copy())
+    return outer
+
+
 def semi_joins(expression: exp.Expr) -> exp.Expr:
     """SEMI and ANTI JOIN, as the EXISTS and NOT EXISTS they are: the left
     rows with (without) a match, once each, of the left side's columns. A

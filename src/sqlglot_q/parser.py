@@ -976,6 +976,16 @@ class Statement:
             if m[2] == TEXT_NULL:  # {x iasc TEXT_NULL x`k}: nulls last (or first)
                 return null_order(self, target, m[3], first=m[1] == "idesc")
             return ordered(self, exp.Literal.string(m[3]), target, desc=m[1] == "idesc")
+        position = POSITION_SORT.match(text)
+        if position:
+            return by_position(self, position[1], self.expr(stop), desc=position[2] == "xdesc")
+        position = POSITION_KEYS.match(text)
+        if position:
+            # A text key, or nulls moved, of the k-th column.
+            target = self.expr(stop)
+            if position[2] in (TEXT_NULL, "null"):
+                return null_order(self, target, f"#{position[3]}", first=position[1] == "idesc")
+            return by_position(self, position[3], target, desc=position[1] == "idesc")
         nulls = NULL_ORDER.match(text)
         if nulls:
             # {x iasc null x`k} r: r with k's nulls moved last (or, with
@@ -2202,8 +2212,12 @@ def table(parser: Statement, name: str) -> exp.Table:
 
 
 def as_table(parser: Statement, node: exp.Expr) -> exp.Expr:
-    if isinstance(node, exp.Paren) and isinstance(node.this, (exp.Column, TableLiteral)):
+    if isinstance(node, exp.Paren) and isinstance(
+        node.this, (exp.Column, TableLiteral, exp.Subquery)
+    ):
         node = node.this
+    if isinstance(node, exp.Subquery) and node.args.get("alias"):
+        return node  # `a`b xcol q: q with its columns renamed
     if isinstance(node, TableLiteral):
         # ([] k:1 2;s:`a`b) as a source: (VALUES (1, 'a'), (2, 'b')) AS q_v(k, s).
         cols = [
@@ -2418,6 +2432,19 @@ def ordered(parser: Statement, cols: exp.Expr, target: exp.Expr, desc: bool) -> 
     )
     # q's own null order, said out loud: SQL dialects differ on the default.
     terms = [exp.Ordered(this=exp.column(n), desc=desc, nulls_first=not desc) for n in names]
+    return sorted_by(parser, terms, target)
+
+
+def by_position(parser: Statement, k: str, target: exp.Expr, desc: bool) -> exp.Expr:
+    """{((cols x) k) xasc x} r: r sorted on its k-th column, ORDER BY k+1."""
+    term = exp.Ordered(this=exp.Literal.number(int(k) + 1), desc=desc, nulls_first=not desc)
+    target = target.this if isinstance(target, exp.Paren) else target
+    if not is_query(target):
+        parser.fail("a sort on a column's position is read on a query")
+    return sorted_by(parser, [term], target)
+
+
+def sorted_by(parser: Statement, terms: list[exp.Ordered], target: exp.Expr) -> exp.Expr:
     if isinstance(target, exp.Paren):
         target = target.this
     if isinstance(target, (exp.Column, Sorted, Joined)):
@@ -2466,8 +2493,6 @@ def limited(parser: Statement, count: exp.Expr, target: exp.Expr) -> exp.Expr:
 
 
 def renamed(parser: Statement, names: exp.Expr, target: exp.Expr) -> exp.Expr:
-    if not isinstance(target, exp.Select):
-        parser.fail("xcol is read on a select")
     while isinstance(names, exp.Paren):
         names = names.this
     new = (
@@ -2477,6 +2502,17 @@ def renamed(parser: Statement, names: exp.Expr, target: exp.Expr) -> exp.Expr:
         if isinstance(names, Rows)
         else parser.fail("xcol takes a symbol list")
     )
+    if isinstance(bare(target), exp.SetOperation) or (
+        isinstance(target, exp.Select) and any(isinstance(i, exp.Star) for i in target.expressions)
+    ):
+        # Columns not written out: a derived table's column list, FROM (...)
+        # AS q_c(a, b), which renames its first columns as xcol does.
+        alias = exp.TableAlias(
+            this=exp.to_identifier("q_c"), columns=[exp.to_identifier(n) for n in new]
+        )
+        return exp.Subquery(this=bare(target), alias=alias)
+    if not isinstance(target, exp.Select):
+        parser.fail("xcol is read on a select")
     items = target.expressions
     if len(new) > len(items):
         parser.fail("xcol names more columns than the select has")
@@ -2595,6 +2631,13 @@ def no_from(parser: Statement, table: TableLiteral) -> exp.Expr:
 
 
 NULL_ORDER = re.compile(r"\{x (iasc|idesc) null x`([A-Za-z][A-Za-z0-9_]*)\}\Z")
+# The generator's sort on an unnamed column, by its position k.
+POSITION_SORT = re.compile(r"\{\(\(cols x\) (\d+)\) (xasc|xdesc) x\}\Z")
+POSITION_KEYS = re.compile(
+    r"\{x (iasc|idesc) ("
+    + "|".join(re.escape(t) for t in (TEXT_KEY, TEXT_NULL, "null"))
+    + r") x \(cols x\) (\d+)\}\Z"
+)
 
 STRING_AGG_TEXT = re.compile(
     r'\{\$\[all null x;`;`\$\("((?:[^"\\]|\\.)*)"\) sv string x where not null x\]\}\Z'
@@ -2696,6 +2739,10 @@ def null_order(parser, target, key: str, first: bool):
         parser.fail("a null sort is read only after a sort on its key")
     for term in order.expressions:
         if isinstance(term.this, exp.Column) and term.this.name == key:
+            term.set("nulls_first", first)
+            return node
+        position = isinstance(term.this, exp.Literal) and not term.this.is_string
+        if key.startswith("#") and position and int(term.this.name) == int(key[1:]) + 1:
             term.set("nulls_first", first)
             return node
     parser.fail(f"a null sort on {key} with no sort on {key} ahead of it")
