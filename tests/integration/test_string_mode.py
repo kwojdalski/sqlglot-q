@@ -73,6 +73,22 @@ QUERIES = [
     "SELECT a, w, FIRST_VALUE(w) OVER (ORDER BY a) AS p FROM s",
     "SELECT a, MAX(w) OVER () AS p FROM s",
     "SELECT a, MIN(w) OVER (ORDER BY a ROWS 1 PRECEDING) AS p FROM s",
+    # A join on a text key: a string's null is the empty one.
+    "SELECT s.a, s.w, t2.k FROM s JOIN (SELECT w, a AS k FROM s WHERE a > 3) AS t2 ON s.w = t2.w",
+    "SELECT x.a, x.w FROM s AS x LEFT JOIN (SELECT v, a AS k FROM s) AS y ON x.w = y.v",
+    # Windows of text: LAST_VALUE's peers, NTH_VALUE, COUNT(DISTINCT), FIRST.
+    "SELECT a, w, LAST_VALUE(w) OVER (ORDER BY a) AS l FROM s",
+    "SELECT a, w, NTH_VALUE(w, 2) OVER (ORDER BY a) AS l FROM s",
+    "SELECT a, COUNT(DISTINCT w) OVER () AS c FROM s",
+    "SELECT a, FIRST(w) OVER () AS f FROM s",
+    # A constant text value, one per row.
+    "SELECT a, 'x' AS c FROM s",
+    "SELECT a, UPPER('x') AS c, CAST(5 AS VARCHAR) AS d FROM s",
+    "SELECT a, STRFTIME(DATE '2024-01-05', '%Y') AS y FROM s",
+    # Row values, GREATEST/LEAST and NULLIF of text columns.
+    "SELECT a, w FROM s WHERE (w, a) IN (SELECT w, a FROM s WHERE a < 3)",
+    "SELECT a, GREATEST(w, v) AS g, LEAST(w, v) AS l, GREATEST(w, v, 'q') AS h FROM s",
+    "SELECT a, NULLIF(w, v) AS n, NULLIF(w, w) AS m FROM s",
 ]
 
 

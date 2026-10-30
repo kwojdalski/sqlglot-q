@@ -64,9 +64,18 @@ class TestSelect(Validator):
 
     def test_literals(self):
         self.validate("SELECT a, 'abc', 'a b', '' FROM t", 'select a, `abc, `$("a b"), ` from t')
-        self.validate("SELECT a, 'abc' FROM t", 'select a, "abc" from t', string_literals="string")
+        # A string is a list of characters: spread as one value per row.
+        from sqlglot_q.generator import TEXT_SPREAD
+
         self.validate(
-            "SELECT a, 'a' FROM t", 'select a, enlist "a" from t', string_literals="string"
+            "SELECT a, 'abc' FROM t",
+            f'select a, {TEXT_SPREAD}[i;"abc"] from t',
+            string_literals="string",
+        )
+        self.validate(
+            "SELECT a, 'a' FROM t",
+            f'select a, {TEXT_SPREAD}[i;enlist "a"] from t',
+            string_literals="string",
         )
         self.validate("SELECT a, TRUE, FALSE, NULL FROM t", "select a, 1b, 0b, 0N from t")
         # q refuses 1E3 and 1.5E+3; it reads 1000f and 1500.0.

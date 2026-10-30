@@ -196,7 +196,8 @@ def function(parser, value, order, non_null, QCall):
         kind = exp.Lead if value.args["fn"] == "leadd" else exp.Lag
         return kind(this=value.this, offset=n, default=default), None, True
     if isinstance(value, QCall) and value.args["fn"] == "first":
-        return exp.FirstValue(this=value.this), None, True
+        # With no sort ahead, the table's first row: FIRST_VALUE OVER ().
+        return exp.FirstValue(this=value.this), None, order is not None
     if (
         isinstance(value, QCall)
         and value.args["fn"] == "last"

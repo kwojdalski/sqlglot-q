@@ -129,6 +129,16 @@ ANY_FILL = "{$[0h=type x;{$[0=count x;y;x]}'[x;y];y^x]}"
 # A window's one value per partition, over its rows: update spreads an atom,
 # but one string is a list of characters.
 TEXT_SPREAD = "{$[10h=type y;(count x)#enlist y;y]}"
+# NULLIF(a, b) of two columns in string mode: a, its null (an index past
+# the end, "" for strings) where y holds.
+NULLIF_ANY = "{@[x;w;:;(count w:where y)#enlist x count x]}"
+# GREATEST and LEAST in string mode: compared as symbols, a null skipped.
+TEXT_GREATEST = (
+    "{n:{$[0h=type x;0=count each x;null x]};c:{$[(type x) in 0 10h;`$x;x]};"
+    "s:{$[10h=type x;(count y)#enlist x;x]};x:s[x;y];y:s[y;x];"
+    "?[n x;y;?[n y;x;?[(c x)>=c y;x;y]]]}"
+)
+TEXT_LEAST = TEXT_GREATEST.replace(">=", "<=")
 PARSE = {"boolean": "B", "short": "H", "int": "I", "long": "J", "real": "E", "float": "F"}
 TEXT_AGG = '{{$[all {null} x;"";({sep}) sv x where not {null} x]}}'.replace(
     "{null}", TEXT_NULL.replace("{", "{{").replace("}", "}}")
@@ -229,7 +239,8 @@ LEFT_JOIN = "{k:(),x;ej[k;y;z] uj y where not (k#y) in k#z}"
 # FULL JOIN: the matches of the rows with no null key, then each side's rows
 # with no match (a null key matches nothing), the other side's columns null.
 FULL_JOIN = (
-    "{k:(),x;n:{max each null x#y}[k];a:y where not n y;b:z where not n z;"
+    "{k:(),x;n:{max value {$[0h=type x;0=count each x;null x]} each flip x#y}[k];"
+    "a:y where not n y;b:z where not n z;"
     "(ej[k;a;b] uj y where not (k#y) in k#b) uj z where not (k#z) in k#a}"
 )
 HALF_EVEN = "{f:floor x+0.5;f-(x=f-0.5)&1=f mod 2}"
@@ -242,8 +253,8 @@ IN_ANY = (
 # (a, b) IN (SELECT ...): the rows as a table, in the subquery's rows that
 # have no null; a row with a null part matches nothing, as in SQL.
 TUPLE_IN = (
-    '{k:`$"x",\'string til count x;r:k xcol y;r:r where not max each null r;'
-    "(not max null x)&(flip k!x) in r}"
+    '{n:{$[0h=type x;0=count each x;null x]};k:`$"x",\'string til count x;r:k xcol y;'
+    "r:r where not max value n each flip r;(not max n each x)&(flip k!x) in r}"
 )
 # x LIKE y with y a pattern per row: each made q's (% *, _ ?, q's own
 # wildcards bracketed) and matched row by row.
@@ -254,7 +265,7 @@ LIKE_EACH = '{x like\' {raze {$[x="%";"*";x="_";"?";x in "*?[]";"[",x,"]";x]} ea
 # under RANGE); NTH_VALUE the partition's k-th, NULL before the frame has
 # it (and over the whole partition, the k-th on every row).
 LAST_ROW = "{x}"
-NTH = "{?[(til count x)>=y-1;x y-1;x 0N]}"
+NTH = "{{$[x;y;z]}[;x y-1;x count x] each (til count x)>=y-1}"
 NTH_WHOLE = "{x y-1}"
 # BOOL_AND and BOOL_OR over where the condition is true (x) and where it is
 # known (y): SQL skips the unknown rows. NULL over none is false in q, which
@@ -922,11 +933,27 @@ class QGenerator(Generator):
     def intdiv_sql(self, node: exp.IntDiv) -> str:
         return f"{INT_DIV}[{self.sql(node.this)};{self.sql(node.expression)}]"
 
+    def text_extreme(self, node: exp.Expr) -> str | None:
+        items = [node.this, *node.expressions]
+        if self.symbols or any(atomic_value(i) for i in items):
+            return None
+        word = TEXT_GREATEST if isinstance(node, exp.Greatest) else TEXT_LEAST
+        text = self.sql(items[0])
+        for item in items[1:]:
+            text = f"{word}[{text};{self.sql(item)}]"
+        return text
+
     def greatest_sql(self, node: exp.Greatest) -> str:
+        text = self.text_extreme(node)
+        if text is not None:
+            return text  # string mode, columns of unknown type
         # | is q's max, and like GREATEST it skips a null: 1|0N is 1.
         return "|".join(self.operand(i) for i in [node.this, *node.expressions])
 
     def least_sql(self, node: exp.Least) -> str:
+        text = self.text_extreme(node)
+        if text is not None:
+            return text
         # & is q's min, but 1&0N is 0N where LEAST skips the null. Filling
         # each side from the other (y^x) fails when a side is a literal atom
         # ('nyi), so the nulls are taken apart with ?[...], which also
@@ -939,6 +966,13 @@ class QGenerator(Generator):
         return text
 
     def nullif_sql(self, node: exp.Nullif) -> str:
+        if not self.symbols and not any(
+            is_text(x) or atomic_value(x) for x in (node.this, node.expression)
+        ):
+            from sqlglot_q.truth import holds
+
+            same = holds(self, exp.EQ(this=node.this.copy(), expression=node.expression.copy()))
+            return f"{NULLIF_ANY}[{self.sql(node.this)};{same}]"
         case = exp.Case(
             ifs=[
                 exp.If(
@@ -1892,6 +1926,9 @@ def scalar(self, node: exp.Expr) -> str:
 
 def null_of(self, node) -> str:
     # A grouping set's missing key: its column's null, typed as the column.
+    # A string's null is the empty one, a cell under by, a row of one else.
+    if not self.symbols:
+        return '""' if getattr(self, "_by", False) else 'enlist ""'
     return f"first 0#{self.sql(node.this)}"
 
 

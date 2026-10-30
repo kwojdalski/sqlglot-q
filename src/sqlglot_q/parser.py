@@ -54,6 +54,7 @@ from sqlglot_q.generator import (
     NTH,
     NTH_WHOLE,
     NTILE,
+    NULLIF_ANY,
     NULLS,
     OTHERS,
     PARSE,
@@ -74,7 +75,9 @@ from sqlglot_q.generator import (
     TEXT_AGG,
     TEXT_CMP,
     TEXT_FILL,
+    TEXT_GREATEST,
     TEXT_KEY,
+    TEXT_LEAST,
     TEXT_LENGTH,
     TEXT_MAX,
     TEXT_MIN,
@@ -797,6 +800,28 @@ class Statement:
             value = self.expr(set())
             self.expect("]")
             return value
+        if text == NULLIF_ANY and self.is_("["):
+            self.expect("[")
+            value = self.expr(set())
+            self.expect(";")
+            cond = bare(self.expr(set()))
+            self.expect("]")
+            if not isinstance(cond, exp.EQ):
+                self.fail("NULLIF is read with an equality")
+            other = cond.expression if cond.this == value else cond.this
+            return exp.Nullif(this=literal(value), expression=literal(other))
+        if text in (TEXT_GREATEST, TEXT_LEAST) and self.is_("["):
+            self.expect("[")
+            first = self.expr(set())
+            self.expect(";")
+            second = self.expr(set())
+            self.expect("]")
+            kind = exp.Greatest if text == TEXT_GREATEST else exp.Least
+            head = literal(first)
+            if isinstance(head, kind):  # a fold of three or more
+                items = [*head.expressions, literal(second)]
+                return kind(this=head.this, expressions=items, ignore_nulls=True)
+            return kind(this=head, expressions=[literal(second)], ignore_nulls=True)
         if text == TEXT_CMP:
             return self.expr(stop)  # strings compared as symbols: the values
         if text == ANY_FILL and self.is_("["):

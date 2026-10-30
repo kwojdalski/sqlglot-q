@@ -134,7 +134,12 @@ def stage(gen: QGenerator, plan, value: str, tie_fix: bool, name: str, source: s
     text = f"update {name}:{value}{by} from {wrap(src)}"
     if tie_fix:
         peers = ",".join([*parts, *[t[0] for t in terms]])
-        text = f"update {name}:last {name} by {peers} from ({text})"
+        last = f"last {name}"
+        if not gen.symbols and value.startswith(("{x} ", "{{$[x;y;z]}")):
+            from sqlglot_q.generator import TEXT_SPREAD
+
+            last = f"{TEXT_SPREAD}[i;{last}]"  # a string, over the peers' rows
+        text = f"update {name}:{last} by {peers} from ({text})"
     return text
 
 
@@ -148,6 +153,12 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
 
     if isinstance(fn, exp.RowNumber):
         return "1+til count i", False, has_order
+    if isinstance(fn, (exp.First, exp.Last)) and not fn.args.get("expression"):
+        # DuckDB's FIRST(x) OVER (...) is FIRST_VALUE, LAST(x) LAST_VALUE.
+        kind = exp.FirstValue if isinstance(fn, exp.First) else exp.LastValue
+        win = win.copy()
+        win.set("this", kind(this=fn.this.copy()))
+        return function(gen, win, order, has_order)
     if isinstance(fn, exp.FirstValue):
         if frame not in ("whole", "range", "rows"):
             raise Refused("FIRST_VALUE is translated from the partition's first row")
@@ -213,8 +224,10 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
         if isinstance(arg, exp.Distinct):
             if frame != "whole" or len(arg.expressions) != 1:
                 raise Refused("COUNT(DISTINCT ...) OVER is translated over the whole partition")
+            from sqlglot_q.generator import TEXT_NULL
+
             col = gen.operand(arg.expressions[0])
-            return f"count distinct {col} where not null {col}", False, False
+            return f"count distinct {col} where not {TEXT_NULL} {col}", False, False
         star = arg is None or isinstance(arg, exp.Star)
         col = None if star else gen.operand(arg)
         if frame == "whole":

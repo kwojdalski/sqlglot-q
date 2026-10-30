@@ -156,9 +156,9 @@ def joined(gen: QGenerator, left: str, join: exp.Join, drop: list[str] | None = 
     # null keys up. A LEFT JOIN's right side loses its null keys (each left
     # row still appears); an inner join's left side does.
     if side == "LEFT":
-        right = f"(select from {wrap(right)} where {non_null([j for _, j in pairs])})"
+        right = f"(select from {wrap(right)} where {non_null([j for _, j in pairs], gen)})"
     else:
-        left = f"(select from {wrap(left)} where {non_null([k for k, _ in pairs])})"
+        left = f"(select from {wrap(left)} where {non_null([k for k, _ in pairs], gen)})"
     renames = [(k, j) for k, j in pairs if k != j]
     if renames:
         # ON t.a = u.b: u gets a copy of b named a to join on, and keeps b.
@@ -226,7 +226,12 @@ def ambiguous(gen: QGenerator, node: exp.Select) -> str | None:
     return None
 
 
-def non_null(keys: list[str]) -> str:
+def non_null(keys: list[str], gen=None) -> str:
+    if gen is not None and not gen.symbols:
+        # A string's null is the empty one: null of a string tests its chars.
+        from sqlglot_q.generator import TEXT_NULL
+
+        return ", ".join(f"not {TEXT_NULL} {k}" for k in keys)
     return ", ".join(f"not null {k}" for k in keys)
 
 
@@ -396,7 +401,22 @@ def projection(gen: QGenerator, items: list[exp.Expr]) -> list[str]:
     a q select whose columns are all atoms is refused ('rank), so then each
     constant is spread over the rows: q 5 runs {(count x)#y}[i;1] per row."""
     if any(i.find(exp.Column, exp.AggFunc, exp.Star) for i in items):
-        return [gen.sql(i) for i in items]
+        if gen.symbols:
+            return [gen.sql(i) for i in items]
+        from sqlglot_q.generator import TEXT_SPREAD, constant
+
+        out = []
+        for item in items:
+            value = unalias(item)
+            if constant(value) or (isinstance(value, exp.Literal) and value.is_string):
+                # A string is a list of chars: spread as one value per row.
+                text = f"{TEXT_SPREAD}[i;{gen.sql(value)}]"
+                out.append(
+                    f"{gen.name(item.alias)}:{text}" if isinstance(item, exp.Alias) else text
+                )
+            else:
+                out.append(gen.sql(item))
+        return out
     out = []
     for item in items:
         value = f"{{(count x)#y}}[i;{gen.sql(unalias(item))}]"
