@@ -56,6 +56,7 @@ from sqlglot_q.generator import (
     NTH,
     NTH_WHOLE,
     NTILE,
+    NULL_LIKE,
     NULL_OF,
     NULLIF_ANY,
     NULLS,
@@ -897,6 +898,9 @@ class Statement:
         if text == TEXT_BOOL:
             arg = self.expr(stop)
             return exp.Cast(this=literal(arg), to=exp.DataType.build("BOOLEAN"))
+        if text == NULL_LIKE:
+            arg = self.expr(stop)
+            return TypedNull(this=arg)  # the null of a column's type, a CASE's ELSE
         if text == TEXT_CMP:
             return self.expr(stop)  # strings compared as symbols: the values
         if text == ANY_FILL and self.is_("["):

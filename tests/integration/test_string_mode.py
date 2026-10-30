@@ -96,6 +96,12 @@ QUERIES = [
     "SELECT a, REGEXP_REPLACE(w, 'b', 'X') AS r FROM s",
     "SELECT w, STRING_AGG(v, ',' ORDER BY v DESC) AS l FROM s GROUP BY w",
     "SELECT a, w, CASE WHEN ROW_NUMBER() OVER (ORDER BY a) = 1 THEN w ELSE v END AS k FROM s",
+    # A CASE of a text column with no ELSE: "" on each row, not one "".
+    "SELECT a, CASE WHEN a > 2 THEN w END AS c FROM s",
+    # LAG/LEAD of text with a text default.
+    "SELECT a, w, LAG(w) OVER (ORDER BY a) AS p, LEAD(v, 1, 'end') OVER (ORDER BY a) AS q FROM s",
+    # = a number: no string, q's = (~' would pair the number per row).
+    "SELECT w, ANY_VALUE(v) AS a FROM s WHERE w IS NOT NULL GROUP BY w HAVING COUNT(*) = 1",
 ]
 
 

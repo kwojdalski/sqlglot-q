@@ -152,6 +152,8 @@ REPLACE_FIRST = (
     "{`${$[count w:x ss y;((first w)#x),z,(count[y]+first w)_x;x]}[;y;z] each string x}",
     "{{$[count w:x ss y;((first w)#x),z,(count[y]+first w)_x;x]}[;y;z] each x}",
 )
+# The null of x's type, on each of its rows for a column of strings.
+NULL_LIKE = '{$[0h=type x;(count x)#enlist "";x 0N]}'
 # A column's null, of its type: "" for a column of strings, whose 0# is ().
 NULL_OF = '{$[0h=type x;"";first 0#x]}'
 # NULLIF(a, b) of two columns in string mode: a, its null (an index past
@@ -220,8 +222,14 @@ MOVING_NULLS = {
 SIGN = "{?[null x;0Ni;signum x]}"
 # LAG/LEAD with a default: the default only past the partition's edge, in the
 # column's type (q refuses an amend of another type).
-LAG_DEFAULT = "{v:y xprev x;@[v;til y&count x;:;(abs type v)$z]}"
-LEAD_DEFAULT = "{v:neg[y] xprev x;@[v;(count x)-1+til y&count x;:;(abs type v)$z]}"
+# (A column of strings has no type to cast the default to: it goes in as is.)
+LAG_DEFAULT = (
+    "{v:y xprev x;w:til y&count x;@[v;w;:;$[0h=type v;(count w)#enlist z;(abs type v)$z]]}"
+)
+LEAD_DEFAULT = (
+    "{v:neg[y] xprev x;w:(count x)-1+til y&count x;"
+    "@[v;w;:;$[0h=type v;(count w)#enlist z;(abs type v)$z]]}"
+)
 # Window functions with no q word, applied to a stage's rows (windows.py).
 # NTILE as SQL defines it: the first n mod k buckets get the extra rows.
 NTILE = "{n:count y;s:n div x;r:n mod x;j:til n;1+?[j<r*s+1;j div s+1;r+(j-r*s+1) div s]}"
@@ -477,7 +485,11 @@ def monad(word: str, skip_nulls: bool = False):
 
     def handler(self, node):
         arg = self.operand(node.this)
-        return f"{word} {arg} where not null {arg}" if skip_nulls else f"{word} {arg}"
+        if not skip_nulls:
+            return f"{word} {arg}"
+        # A string's null is the empty one; null of a string tests its chars.
+        null = "null" if self.symbols else TEXT_NULL
+        return f"{word} {arg} where not {null} {arg}"
 
     return handler
 
@@ -672,6 +684,9 @@ class QGenerator(Generator):
                 # One value, a string or not: matched against each row.
                 match = f"{self.operand(left)}~\\:{self.operand(right)}"
                 return match if isinstance(node, exp.EQ) else f"not {match}"
+            if atomic_value(left) or atomic_value(right):
+                # A number, a date: no string, q's = (~' would pair it per row).
+                return f"{self.operand(left)}{glyph}{self.operand(right)}"
             # Two columns, of text or not: match row by row.
             match = f"{self.operand(left)}~'{self.operand(right)}"
             return match if isinstance(node, exp.EQ) else f"not {match}"
@@ -1450,6 +1465,9 @@ class QGenerator(Generator):
                 return "0N"
             if isinstance(known, (exp.Literal, exp.Boolean)) or atomic_literal(known):
                 return f"(enlist {self.sql(known)}) 0N"
+            if not self.symbols:
+                # A column of strings: "" on each row, where x 0N is one "".
+                return f"{NULL_LIKE} {self.operand(known)}"
             return f"{self.operand(known)} 0N"
 
         subject = node.this
