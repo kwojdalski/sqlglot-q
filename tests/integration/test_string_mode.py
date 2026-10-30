@@ -114,6 +114,11 @@ QUERIES = [
     # IGNORE NULLS of text: "" is the null.
     "SELECT a, w, LAST_VALUE(w IGNORE NULLS) OVER (ORDER BY a) AS x FROM s",
     "SELECT a, w, FIRST_VALUE(w IGNORE NULLS) OVER (ORDER BY a DESC) AS x FROM s",
+    # Concatenation of a number: its SQL text.
+    "SELECT a, w || a AS x FROM s",
+    "SELECT a, CONCAT(w, '-', a, 1.5) AS x FROM s",
+    "SELECT a, CONCAT_WS('/', w, a, v) AS x FROM s",
+    "SELECT a, CONCAT(UPPER(w), a * 1.5) AS x FROM s",
 ]
 
 

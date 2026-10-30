@@ -49,6 +49,17 @@ QUERIES = [
     "SELECT g, n, LAST_VALUE(n IGNORE NULLS) OVER (PARTITION BY g ORDER BY o "
     "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS f FROM t",
     "SELECT g, d, LAST_VALUE(d IGNORE NULLS) OVER (ORDER BY o, g) AS f FROM t",
+    # A concatenation's parts as SQL's text: 2.0, 2024-01-31 and true, where
+    # q's string gives 2, 2024.01.31 and 1b; a number literal is one value.
+    "SELECT g, CONCAT(s, x) AS a FROM t",
+    "SELECT g, s || x AS a FROM t",
+    "SELECT g, CONCAT(s, d) AS a FROM t",
+    "SELECT g, s || d AS a FROM t",
+    "SELECT g, CONCAT(s, n, x) AS a FROM t",
+    "SELECT g, CONCAT('n=', n) AS a FROM t",
+    "SELECT g, CONCAT_WS('-', s, x, d) AS a FROM t",
+    "SELECT g, CONCAT(s, 2.5) AS a FROM t",
+    "SELECT g, CONCAT(s, o > 2) AS a FROM t",
 ]
 
 # On trades and quotes.

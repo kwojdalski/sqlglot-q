@@ -97,6 +97,7 @@ from sqlglot_q.generator import (
     TEXT_MIN,
     TEXT_NULL,
     TEXT_OF,
+    TEXT_PART,
     TEXT_PICK,
     TEXT_SPREAD,
     TRUNC,
@@ -811,7 +812,7 @@ class Statement:
             joined = self.equijoin()
             joined.set("side", "LEFT" if text == LEFT_JOIN else "FULL")
             return joined
-        if text == TEXT_OF:
+        if text in (TEXT_OF, TEXT_PART):
             return exp.Cast(this=self.expr(stop), to=exp.DataType.build("VARCHAR"))
         if text == scalars.ADD_MONTHS and self.is_("["):
             self.expect("[")
@@ -837,9 +838,9 @@ class Statement:
             if node is None:
                 self.fail("a lambda with the wrong arguments")
             return node
-        joined = re.fullmatch(
-            r"\{(?:`\$)?\((.*)\) sv (?:string x where not null x|x where 0<count each x)\}", text
-        )
+        joined = re.fullmatch(r"\{(?:`\$)?\((.*?)\) sv x where 0<count each x:(.*) each x\}", text)
+        if joined is not None and joined.group(2) not in (TEXT_OF, TEXT_PART):
+            joined = None
         if joined is not None and self.is_("each"):
             # The generator's CONCAT_WS, of the parts' non-null text.
             toks = [t for t in tokenize(joined.group(1)) if t.text != "enlist"]

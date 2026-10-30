@@ -281,6 +281,10 @@ TEXT_OF = (
     f"-12h=t;{TEXT_TS} x;12h=t;{TEXT_TS} each x;-9h=t;{TEXT_FLOAT} x;9h=t;{TEXT_FLOAT} each x;"
     "string x]}"
 )
+# A part of a concatenation in string mode: a string as it is, anything else
+# as CAST(x AS VARCHAR) writes it (2.0, 2024-01-31, true; q's string has 2,
+# 2024.01.31 and 1b).
+TEXT_PART = f"{{$[(type x) in 0 10h;x;{TEXT_OF} x]}}"
 # A join's side without the columns the query reads from another side (and
 # that it may have too): q's joined table keeps the right side's.
 OTHERS = "{(cols[x] except (),y)#x}"
@@ -1073,10 +1077,11 @@ class QGenerator(Generator):
             return self.refuse("CONCAT_WS is translated with a literal separator")
         items = ";".join(self.sql(p) for p in parts)
         sep_text = f"({self.chars(sep.this)})"
+        # Each part as its text (2.0, not q's 2), a null's being empty.
+        part = TEXT_OF if self.symbols else TEXT_PART
+        body = f"{{{sep_text} sv x where 0<count each x:{part} each x}}"
         if self.symbols:
-            body = f"{{`${sep_text} sv string x where not null x}}"
-        else:
-            body = f"{{{sep_text} sv x where 0<count each x}}"
+            body = f"{{`${body[1:-1]}}}"
         if len(parts) == 1:
             return f"{body} each enlist each {self.operand(parts[0])}"
         return f"{body} each flip ({items})"
@@ -1293,14 +1298,13 @@ class QGenerator(Generator):
         for part in parts:
             if isinstance(part, exp.Literal) and part.is_string:
                 pieces.append((self.chars(part.this), True))
-            elif constant(part) and not getattr(self, "_lifting", False):
+            elif (isinstance(part, exp.Literal) or constant(part)) and not getattr(
+                self, "_lifting", False
+            ):
                 # One value, as a literal is: joined to each row, not paired.
-                text = self.operand(part)
-                pieces.append((f"string {text}" if self.symbols else text, True))
-            elif self.symbols:
-                pieces.append((f"string {self.operand(part)}", False))
+                pieces.append((self.text_part(part), True))
             else:
-                pieces.append((self.operand(part), False))
+                pieces.append((self.text_part(part), False))
         if self.symbols:
             first, last = parts[0], parts[-1]
             for part, edge in ((first, str.lstrip), (last, str.rstrip)):
@@ -1323,6 +1327,16 @@ class QGenerator(Generator):
             text, atom = f"{left}{glyph}{right}", atom and lit
         # Parenthesised: a select phrase is cut at its commas.
         return f"`$({text})" if self.symbols else f"({text})"
+
+    def text_part(self, part: exp.Expr) -> str:
+        """A part of a concatenation as its text, which CONCAT and || cast it
+        to; a string (and in symbol mode a symbol) is its own."""
+        text = self.operand(part)
+        if isinstance(part, (exp.Upper, exp.Lower, exp.Trim, exp.Substring)) or (
+            isinstance(part, exp.Cast) and part.to.this in TEXT
+        ):
+            return f"string {text}" if self.symbols else text
+        return f"{TEXT_OF} {text}" if self.symbols else f"{TEXT_PART} {text}"
 
     def length_sql(self, node: exp.Length) -> str:
         if self.symbols:
