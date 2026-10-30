@@ -233,7 +233,8 @@ CALLS = [
     # apart, as 1.7e18 nanoseconds are past a float's exact integers.
     Call(
         exp.TimeToUnix,
-        "{n:(`long$`timestamp$x)-`long$1970.01.01D0;(n div 1000000000)+(n mod 1000000000)%1e9}",
+        "{n:$[16h=abs type x;`long$x;(`long$`timestamp$x)-`long$1970.01.01D0];"
+        "(n div 1000000000)+(n mod 1000000000)%1e9}",
     ),
     # Math. ATAN2(y, x) by the half-angle form; 0 at the origin, as SQL.
     Call(exp.Atan2, "{?[(x=0)&y=0;0f;2*atan x%(sqrt (x*x)+y*y)+y]}", keys=("this", "expression")),

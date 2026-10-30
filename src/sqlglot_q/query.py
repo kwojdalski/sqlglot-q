@@ -87,7 +87,9 @@ def others_names(node: exp.Select) -> dict[str, list[str]]:
         keys |= {u.name for u in join.args.get("using") or []}
         on = join.args.get("on")
         for c in conjuncts(on) if on is not None else []:
-            if isinstance(c, exp.EQ) and all(isinstance(x, exp.Column) for x in c.flatten()):
+            # An equi-join's keys, and an ASOF join's time (t.time >= q.time).
+            keyed = (exp.EQ, exp.GTE, exp.GT, exp.LTE, exp.LT)
+            if isinstance(c, keyed) and all(isinstance(x, exp.Column) for x in c.flatten()):
                 if c.this.name == c.expression.name:
                     keys.add(c.this.name)
     owned: dict[str, set[str]] = {}
@@ -529,7 +531,7 @@ def grouped(
         if name is None and isinstance(expr, exp.Column):
             name = expr.name
         names.append(name)
-        computed.append((name, expr))
+        computed.append((name, of_keys(expr, key_exprs)))
 
     having = node.args.get("having")
     hidden: list[tuple[str, exp.Expr]] = []
@@ -579,6 +581,38 @@ def grouped(
     picked = "" if not reorder else " " + ", ".join(gen.name(n) for n in names)
     filt = f" where {gen.condition(condition)}" if condition is not None else ""
     return f"select{picked} from ({inner}){filt}", names
+
+
+def of_keys(expr: exp.Expr, keys: list[exp.Expr]) -> exp.Expr:
+    """A grouped item's key columns outside its aggregates: under q's by a
+    key is the group's list of it, all one value, so its first (SQL's
+    UPPER(g) of GROUP BY g is one value a group)."""
+    names = {k.name for k in keys if isinstance(k, exp.Column)}
+    if not names:
+        return expr
+
+    def keyed(node: exp.Expr) -> bool:
+        cols = list(node.find_all(exp.Column))
+        return bool(cols) and all(c.name in names for c in cols)
+
+    def wrap_keys(node: exp.Expr) -> exp.Expr:
+        # The largest part of only keys, no aggregate: its first, one value
+        # a group (LENGTH(g) + COUNT(*): FIRST(LENGTH(g)) + COUNT(*)). An
+        # aggregate, a window or a query is left whole.
+        if isinstance(node, (exp.AggFunc, exp.Window, exp.Subquery, exp.Select)):
+            return node
+        if node.find(exp.AggFunc, exp.Window, exp.Subquery, exp.Select):
+            for key, child in list(node.args.items()):
+                if isinstance(child, exp.Expr):
+                    node.set(key, wrap_keys(child))
+                elif isinstance(child, list):
+                    node.set(key, [wrap_keys(c) if isinstance(c, exp.Expr) else c for c in child])
+            return node
+        return exp.First(this=node) if keyed(node) else node
+
+    if isinstance(expr, exp.AggFunc):
+        return expr
+    return wrap_keys(expr.copy())
 
 
 def having_condition(

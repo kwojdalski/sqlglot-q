@@ -755,6 +755,9 @@ class Statement:
             return Where_(this=arg)
         if word == "first" and isinstance(arg, Exec):
             return exp.Subquery(this=arg.this)
+        if word == "first" and not arg.find(*HELPERS):
+            # first (upper g) of a group: FIRST of it, the group's one value.
+            return exp.First(this=literal(bare(arg)))
         self.fail(f"{word} has no SQL form here")
 
     def cast(self, type_name: str, stop: set[str]) -> exp.Expr:
