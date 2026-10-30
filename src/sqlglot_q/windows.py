@@ -244,7 +244,13 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
         return f"{width} mcount {'i' if star else col}", False, True
     if type(fn) in WHOLE:
         if fn.args.get("distinct") or isinstance(fn.this, exp.Distinct):
-            raise Refused("DISTINCT inside a window aggregate has no q form here")
+            values = fn.this.expressions if isinstance(fn.this, exp.Distinct) else []
+            if frame != "whole" or len(values) != 1:
+                raise Refused("DISTINCT inside a window aggregate is translated over the partition")
+            from sqlglot_q.generator import NULL_SAFE
+
+            word = NULL_SAFE.get(type(fn), WHOLE[type(fn)])
+            return f"{word} distinct {gen.operand(values[0])}", False, False
         arg = gen.sql(fn.this)
         if frame == "whole":
             from sqlglot_q.generator import NULL_SAFE

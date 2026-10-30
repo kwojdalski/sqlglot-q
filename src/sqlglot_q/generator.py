@@ -286,6 +286,15 @@ LIKE_EACH = '{x like\' {raze {$[x="%";"*";x="_";"?";x in "*?[]";"[",x,"]";x]} ea
 LAST_ROW = "{x}"
 NTH = "{{$[x;y;z]}[;x y-1;x count x] each (til count x)>=y-1}"
 NTH_WHOLE = "{x y-1}"
+# An aggregate's values in an order (STRING_AGG(s, ',' ORDER BY o)): x by
+# the key y, its nulls first or last as asked.
+_N = "{$[0h=type x;0=count each x;null x]}"
+ORDERED = {
+    (False, False): f"{{x i iasc {_N} y i:iasc y}}",  # ASC NULLS LAST
+    (False, True): "{x iasc y}",  # ASC NULLS FIRST
+    (True, False): "{x idesc y}",  # DESC NULLS LAST
+    (True, True): f"{{x i idesc {_N} y i:idesc y}}",  # DESC NULLS FIRST
+}
 # BOOL_AND and BOOL_OR over where the condition is true (x) and where it is
 # known (y): SQL skips the unknown rows. NULL over none is false in q, which
 # has no null boolean.
@@ -673,16 +682,34 @@ class QGenerator(Generator):
             sep = exp.Literal.string(",")
         if not (isinstance(sep, exp.Literal) and sep.is_string):
             return self.refuse("STRING_AGG is translated with a literal separator")
-        if isinstance(node.this, (exp.Distinct, exp.Order)) or node.args.get("order"):
-            return self.refuse("STRING_AGG with DISTINCT or ORDER BY has no q translation here")
+        values = self.aggregated(node.this)
+        if values.startswith("'"):
+            return values
         sep_text = self.chars(sep.this).replace("enlist ", "")
         if not self.symbols:
             fn = TEXT_AGG.format(sep=sep_text)
             # first enlist: first of the joined string would be its first char
-            return f"first enlist {fn}[{self.sql(node.this)}]"
+            return f"first enlist {fn}[{values}]"
         # Skips nulls as SQL does; all null (or none) is the null symbol.
         fn = STRING_AGG.format(sep=sep_text)
-        return f"first {fn}[{self.sql(node.this)}]"
+        return f"first {fn}[{values}]"
+
+    def aggregated(self, arg: exp.Expr) -> str:
+        """An aggregate's values: x, distinct x, or x in an ORDER BY's order."""
+        if isinstance(arg, exp.Distinct):
+            if len(arg.expressions) != 1:
+                return self.refuse("DISTINCT of several values has no q translation here")
+            return f"distinct {self.operand(arg.expressions[0])}"
+        if isinstance(arg, exp.Order):
+            terms = arg.expressions
+            if len(terms) != 1:
+                return self.refuse("an aggregate's ORDER BY is translated with one key")
+            term = terms[0]
+            desc = bool(term.args.get("desc"))
+            first = term.args.get("nulls_first")
+            first = (not desc) if first is None else bool(first)  # q's own order
+            return f"{ORDERED[(desc, first)]}[{self.sql(arg.this)};{self.sql(term.this)}]"
+        return self.sql(arg)
 
     def dayofweek_sql(self, node) -> str:
         return f"{DOW} {self.operand(node.this)}"
@@ -1031,11 +1058,16 @@ class QGenerator(Generator):
         return f"last {self.operand(node.this)}"
 
     def arrayagg_sql(self, node: exp.ArrayAgg) -> str:
-        if node.args.get("order") or isinstance(node.this, (exp.Distinct, exp.Order)):
-            return self.refuse("ARRAY_AGG with DISTINCT or ORDER BY has no q translation here")
+        if node.args.get("order"):
+            return self.refuse("ARRAY_AGG with ORDER BY outside has no q translation here")
         # Under by, a group's values are a list already; over all rows, the
         # one list enlisted, a row.
-        value = self.operand(node.this)
+        value = self.aggregated(node.this)
+        if value.startswith("'"):
+            return value
+        if isinstance(node.this, exp.Distinct):
+            value = f"asc {value}"  # SQL leaves the order open; sorted, as DuckDB's
+        value = value if " " not in value else f"({value})"
         return value if getattr(self, "_by", False) else f"enlist {value}"
 
     def logical(self, node: exp.Expr) -> str:
@@ -1059,7 +1091,16 @@ class QGenerator(Generator):
         if type(agg) in AGGREGATES and not agg.args.get("distinct"):
             word = NULL_SAFE.get(type(agg), AGGREGATES[type(agg)])
             return f"{word} {self.operand(agg.this)} where {where}"
-        return self.refuse(f"{agg.sql()} FILTER (...) has no q translation here")
+        if agg.find(exp.Window, exp.Select, exp.Subquery):
+            return self.refuse(f"{agg.sql()} FILTER (...) has no q translation here")
+        # Any other aggregate: each of its columns kept to the rows of the
+        # filter, (c where cond), its literal arguments as they are.
+        filtered = agg.copy().transform(
+            lambda n: (
+                QText(this=f"({self.sql(n)} where {where})") if isinstance(n, exp.Column) else n
+            )
+        )
+        return self.sql(filtered)
 
     def trim_sql(self, node: exp.Trim) -> str:
         if node.expression is not None and not node.args.get("collation"):
@@ -1461,6 +1502,8 @@ class QGenerator(Generator):
     # Statements -----------------------------------------------------------
 
     def insert_sql(self, node: exp.Insert) -> str:
+        if node.args.get("returning"):
+            return self.refuse("RETURNING has no q translation")
         verb = "insert"
         conflict = node.args.get("conflict")
         if (node.args.get("alternative") or "").upper() == "REPLACE":
@@ -1530,6 +1573,8 @@ class QGenerator(Generator):
         return f"{table} {verb} {names} xcol {self.operand_query(source)}"
 
     def update_sql(self, node: exp.Update) -> str:
+        if node.args.get("returning"):
+            return self.refuse("RETURNING has no q translation")
         if node.args.get("from_") or node.args.get("joins"):
             # UPDATE ... FROM u: each row's value from a row of u. Written as
             # a plain update, t.g = u.g would read g=g, true on every row.
@@ -1593,11 +1638,30 @@ class QGenerator(Generator):
         return self.refuse(f"ALTER TABLE {action.key.upper()} has no q translation here")
 
     def delete_sql(self, node: exp.Delete) -> str:
+        if node.args.get("using"):
+            # DELETE ... USING u WHERE t.k = u.k: written as a plain delete,
+            # t.k = u.k would read k=k, every row.
+            return self.refuse("DELETE ... USING has no q translation here")
+        if node.args.get("returning"):
+            return self.refuse("RETURNING has no q translation")
         return f"delete from `{self.table_sql(node.this)}{self.where(node.args.get('where'))}"
 
     def create_sql(self, node: exp.Create) -> str:
+        text = self.created(node)
+        if node.args.get("exists") and not text.startswith("'"):
+            # IF NOT EXISTS: an existing table is kept as it is.
+            name = self.table_sql(
+                node.this.this if isinstance(node.this, exp.Schema) else node.this
+            )
+            return f"if[not `{name} in tables[];{text}]"
+        return text
+
+    def created(self, node: exp.Create) -> str:
         schema = node.this
         query = node.expression
+        if node.args.get("kind") == "VIEW" and isinstance(schema, exp.Table) and query:
+            # A q view: its query, computed when it is read.
+            return f"{self.table_sql(schema)}::{self.sql(query)}"
         if node.args.get("kind") == "TABLE" and isinstance(schema, exp.Table) and query:
             # CREATE TABLE t AS SELECT ...: q names the result.
             return f"{self.table_sql(schema)}:{self.sql(query)}"

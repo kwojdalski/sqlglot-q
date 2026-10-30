@@ -104,7 +104,7 @@ def test_q_returns_what_duckdb_returns(answers, sql):
 REFUSED = [
     "SELECT NTH_VALUE(n, a) OVER (ORDER BY n) FROM t",
     "SELECT STRING_AGG(g, sep) FROM t",
-    "SELECT STRING_AGG(DISTINCT g, ',') FROM t",
+    "SELECT STRING_AGG(DISTINCT g, ',' ORDER BY g) FROM t",
 ]
 
 

@@ -84,6 +84,24 @@ QUERIES = [
     "SELECT t.o, v FROM t JOIN u USING (g)",
     "SELECT u.g, t.n FROM u LEFT JOIN t ON u.g = t.g",
     "SELECT a, w, u.g FROM t2 CROSS JOIN u",
+    # An aggregate's ORDER BY and DISTINCT.
+    "SELECT g, STRING_AGG(s, ',' ORDER BY s) AS l FROM t GROUP BY g",
+    "SELECT g, STRING_AGG(s, ',' ORDER BY n DESC) AS l FROM t GROUP BY g",
+    "SELECT g, STRING_AGG(s, ',' ORDER BY n NULLS FIRST) AS l FROM t GROUP BY g",
+    "SELECT g, ARRAY_AGG(n ORDER BY o) AS l FROM t GROUP BY g",
+    "SELECT g, ARRAY_AGG(DISTINCT o) AS l FROM t GROUP BY g",
+    "SELECT STRING_AGG(DISTINCT g, ',') AS l FROM t",
+    "SELECT ARRAY_AGG(s ORDER BY n DESC NULLS FIRST) AS l FROM t",
+    "SELECT g, n, SUM(DISTINCT o) OVER (PARTITION BY g) AS s, AVG(DISTINCT o) OVER () AS a FROM t",
+    # FILTER on any aggregate: each column kept to the filter's rows.
+    "SELECT g, ANY_VALUE(s) FILTER (WHERE n > 5) AS a FROM t GROUP BY g",
+    "SELECT g, ARG_MAX(s, n) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
+    "SELECT g, STDDEV(n) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
+    "SELECT g, COUNT(DISTINCT s) FILTER (WHERE n > 0) AS a FROM t GROUP BY g",
+    "SELECT g, QUANTILE_CONT(x, 0.5) FILTER (WHERE o < 3) AS a FROM t GROUP BY g",
+    "SELECT g, STRING_AGG(s, ',') FILTER (WHERE n > 0) AS a FROM t GROUP BY g",
+    "SELECT g, SUM(n * o) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
+    "SELECT g, COUNT(n) FILTER (WHERE o > 1) AS c FROM t GROUP BY g",
 ]
 
 # Translated, but read back from q only as far as SQL can: one way.
@@ -94,6 +112,14 @@ ONE_WAY = {
     "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g), (o))",
     "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g, o), ())",
     "SELECT g, o, MAX(x) AS m FROM t GROUP BY CUBE (g, o)",
+    "SELECT g, ANY_VALUE(s) FILTER (WHERE n > 5) AS a FROM t GROUP BY g",
+    "SELECT g, ARG_MAX(s, n) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
+    "SELECT g, STDDEV(n) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
+    "SELECT g, COUNT(DISTINCT s) FILTER (WHERE n > 0) AS a FROM t GROUP BY g",
+    "SELECT g, QUANTILE_CONT(x, 0.5) FILTER (WHERE o < 3) AS a FROM t GROUP BY g",
+    "SELECT g, STRING_AGG(s, ',') FILTER (WHERE n > 0) AS a FROM t GROUP BY g",
+    "SELECT g, SUM(n * o) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
+    "SELECT g, COUNT(n) FILTER (WHERE o > 1) AS c FROM t GROUP BY g",
 }
 
 

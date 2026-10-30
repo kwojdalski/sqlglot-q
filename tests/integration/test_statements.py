@@ -42,6 +42,11 @@ CASES = [
     ("ALTER TABLE u RENAME COLUMN v TO w", "SELECT g, w FROM u"),
     ("ALTER TABLE t DROP COLUMN s", "SELECT * FROM t"),
     ("ALTER TABLE u RENAME TO uu", "SELECT g, v FROM uu"),
+    # IF NOT EXISTS keeps an existing table; a view is q's view.
+    ("CREATE TABLE IF NOT EXISTS u (g VARCHAR, v BIGINT)", "SELECT g, v FROM u"),
+    ("CREATE TABLE IF NOT EXISTS w (a BIGINT); INSERT INTO w VALUES (1)", "SELECT a FROM w"),
+    ("CREATE VIEW vw AS SELECT g, v FROM u WHERE v > 15", "SELECT g, v FROM vw"),
+    ("CREATE OR REPLACE TABLE u AS SELECT g, n AS v FROM t WHERE n > 5", "SELECT g, v FROM u"),
     # Already right, kept so they stay so.
     ("UPDATE u SET v = v + 1, g = 'q' WHERE v > 15", "SELECT g, v FROM u"),
     ("DELETE FROM t WHERE g IN (SELECT g FROM u)", "SELECT g, n FROM t"),
@@ -85,8 +90,12 @@ def test_statement_leaves_what_duckdb_leaves(sql, check):
 
 
 REFUSED = [
-    # Written as a plain update, t.g = u.g would read g=g: every row.
+    # Written as a plain update (delete), t.g = u.g would read g=g: every row.
     "UPDATE u SET v = t.n FROM t WHERE t.g = u.g",
+    "DELETE FROM t USING u WHERE t.g = u.g",
+    # q's insert, update and delete give back no rows.
+    "INSERT INTO u VALUES ('e', 50) RETURNING g",
+    "UPDATE u SET v = 1 RETURNING v",
 ]
 
 

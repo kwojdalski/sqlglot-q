@@ -57,6 +57,7 @@ from sqlglot_q.generator import (
     NTILE,
     NULLIF_ANY,
     NULLS,
+    ORDERED,
     OTHERS,
     PARSE,
     PERCENT_RANK,
@@ -355,6 +356,14 @@ class Statement:
 
     def statement(self) -> exp.Expr:
         tok, after = self.peek(), self.peek(1)
+        if tok and tok.kind == "name" and self.is_(":", 1) and self.is_(":", 2):
+            # v::select ...: a q view, CREATE VIEW.
+            self.i += 3
+            query = self.expr(set())
+            if not is_query(query):
+                self.fail("a view is read when it names a query")
+            node = exp.Create(this=exp.to_table(tok.text), kind="VIEW", expression=query)
+            return canonical(node)
         if tok and tok.kind == "name" and after and after.text == ":" and after.kind == "punct":
             if self.is_("(", 2) and self.is_("[", 3):
                 node = self.create(tok.text)
@@ -801,6 +810,16 @@ class Statement:
             value = self.expr(set())
             self.expect("]")
             return value
+        if text in ORDERED.values() and self.is_("["):
+            # x in a key's order, an aggregate's ORDER BY.
+            (desc, first) = next(k for k, v in ORDERED.items() if v == text)
+            self.expect("[")
+            value = self.expr(set())
+            self.expect(";")
+            key = self.expr(set())
+            self.expect("]")
+            term = exp.Ordered(this=literal(key), desc=desc, nulls_first=first)
+            return exp.Order(this=literal(value), expressions=[term])
         if text == NULLIF_ANY and self.is_("["):
             self.expect("[")
             value = self.expr(set())
@@ -898,13 +917,13 @@ class Statement:
         if TEXT_AGG_TEXT.match(text):
             sep = TEXT_AGG_TEXT.match(text)[1]
             self.expect("[")
-            arg = self.expr(set())
+            arg = distinct_of(self.expr(set()))
             self.expect("]")
             return exp.GroupConcat(this=arg, separator=exp.Literal.string(unescape(sep)))
         agg = STRING_AGG_TEXT.match(text)
         if agg:
             self.expect("[")
-            arg = self.expr(set())
+            arg = distinct_of(self.expr(set()))
             self.expect("]")
             return exp.GroupConcat(this=arg, separator=exp.Literal.string(unescape(agg[1])))
         if text == NULLS:
@@ -2046,6 +2065,12 @@ def per_group(item: exp.Expr, keys: list[exp.Expr]) -> exp.Expr:
         return item
     if any(ANONYMOUS.get(a.name, ("", False))[1] for a in value.find_all(exp.Anonymous)):
         return item  # PRODUCT(x): an aggregate sqlglot does not know
+    unwrapped = bare(value)
+    if isinstance(unwrapped, QCall) and unwrapped.args["fn"] == "asc":
+        unwrapped = unwrapped.this
+    if isinstance(unwrapped, Distinct):
+        # (asc distinct x) under by: ARRAY_AGG(DISTINCT x), sorted as written.
+        return exp.alias_(exp.ArrayAgg(this=distinct_of(unwrapped)), item.alias_or_name)
     if any(isinstance(n, HELPERS) for n in value.walk()):
         return item  # a q helper the select reads itself
     if not isinstance(item, exp.Alias):
