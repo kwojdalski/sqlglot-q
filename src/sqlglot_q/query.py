@@ -408,7 +408,10 @@ def projection(gen: QGenerator, items: list[exp.Expr]) -> list[str]:
         out = []
         for item in items:
             value = unalias(item)
-            if constant(value) or (isinstance(value, exp.Literal) and value.is_string):
+            one = isinstance(value, exp.Subquery) or (
+                isinstance(value, exp.Literal) and value.is_string
+            )
+            if constant(value) or one:
                 # A string is a list of chars: spread as one value per row.
                 text = f"{TEXT_SPREAD}[i;{gen.sql(value)}]"
                 out.append(

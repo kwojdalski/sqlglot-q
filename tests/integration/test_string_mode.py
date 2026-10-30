@@ -102,6 +102,8 @@ QUERIES = [
     "SELECT a, w, LAG(w) OVER (ORDER BY a) AS p, LEAD(v, 1, 'end') OVER (ORDER BY a) AS q FROM s",
     # = a number: no string, q's = (~' would pair the number per row).
     "SELECT w, ANY_VALUE(v) AS a FROM s WHERE w IS NOT NULL GROUP BY w HAVING COUNT(*) = 1",
+    # A scalar subquery's text: one value, over the rows.
+    "SELECT a, (SELECT MAX(w) FROM s) AS m FROM s",
 ]
 
 

@@ -642,6 +642,12 @@ class QGenerator(Generator):
     def symbol(self, text: str) -> str:
         if SYMBOL.match(text):
             return f"`{text}"
+        if text != text.strip(" "):
+            # `$ trims a symbol's ends: ' x' would be `x, and s = ' x' would
+            # find the x rows.
+            return self.refuse(
+                'a symbol cannot start or end with a space: use string_literals="string"'
+            )
         return f"`$({self.chars(text)})"
 
     @staticmethod
@@ -1569,7 +1575,12 @@ class QGenerator(Generator):
             self.depth -= 1
 
     def union_sql(self, node: exp.Union) -> str:
-        from sqlglot_q.query import limited, order_terms, output_names, sort
+        from sqlglot_q.query import inline_ctes, limited, order_terms, output_names, sort
+
+        if node.args.get("with_"):
+            # WITH c AS (...) SELECT ... UNION SELECT ...: c written in, as a
+            # select's own CTEs are.
+            return self.sql(inline_ctes(node))
 
         if node.args.get("by_name"):
             if node.args.get("distinct"):
@@ -1592,7 +1603,10 @@ class QGenerator(Generator):
         return limited(self, node, text)
 
     def set_operation(self, node: exp.Expr, word: str) -> str:
-        from sqlglot_q.query import limited, order_terms, output_names, sort
+        from sqlglot_q.query import inline_ctes, limited, order_terms, output_names, sort
+
+        if node.args.get("with_"):
+            return self.sql(inline_ctes(node))
 
         def ordered(text: str) -> str:
             # ORDER BY after it names the columns of its first query.
@@ -1630,6 +1644,11 @@ class QGenerator(Generator):
     # Statements -----------------------------------------------------------
 
     def insert_sql(self, node: exp.Insert) -> str:
+        if node.args.get("with_"):
+            # WITH c AS (...) INSERT INTO t SELECT ... FROM c: c written in.
+            from sqlglot_q.query import inline_ctes
+
+            return self.sql(inline_ctes(node))
         if node.args.get("returning"):
             return self.refuse("RETURNING has no q translation")
         verb = "insert"
@@ -1701,6 +1720,10 @@ class QGenerator(Generator):
         return f"{table} {verb} {names} xcol {self.operand_query(source)}"
 
     def update_sql(self, node: exp.Update) -> str:
+        if node.args.get("with_"):
+            from sqlglot_q.query import inline_ctes
+
+            return self.sql(inline_ctes(node))  # its CTEs written in
         if node.args.get("returning"):
             return self.refuse("RETURNING has no q translation")
         if node.args.get("from_") or node.args.get("joins"):
@@ -1773,6 +1796,10 @@ class QGenerator(Generator):
         return self.refuse(f"ALTER TABLE {action.key.upper()} has no q translation here")
 
     def delete_sql(self, node: exp.Delete) -> str:
+        if node.args.get("with_"):
+            from sqlglot_q.query import inline_ctes
+
+            return self.sql(inline_ctes(node))  # its CTEs written in
         if node.args.get("using"):
             # DELETE ... USING u WHERE t.k = u.k: written as a plain delete,
             # t.k = u.k would read k=k, every row.

@@ -39,6 +39,11 @@ QUERIES = [
     "THEN 'first' ELSE 'rest' END AS k FROM t",
     # UNION ALL BY NAME: q's uj.
     "SELECT g, n FROM t UNION ALL BY NAME SELECT v, g FROM u",
+    # WITH over a set operation: its CTEs written in, as a select's.
+    "WITH a AS (SELECT g FROM t WHERE n > 0), b AS (SELECT g FROM u) "
+    "SELECT g FROM a INTERSECT SELECT g FROM b",
+    "WITH a AS (SELECT g, n, RANK() OVER (PARTITION BY g ORDER BY n DESC) AS r FROM t) "
+    "SELECT g, n FROM a WHERE r = 1 UNION ALL SELECT g, v FROM u",
 ]
 
 # On the calendar table, which has a boolean column f.
@@ -102,6 +107,19 @@ READ_RUN = [
     "aj[`sym`time;trades;quotes]",
     "ej[`sym;trades;select sym, bp:bid from quotes]",
 ]
+
+REFUSED = [
+    # `$ trims a symbol's ends: ' x' would be `x, and s = ' x' find x.
+    "SELECT g, n FROM t WHERE s = ' x'",
+    "SELECT LENGTH(' x ') AS c FROM t",
+]
+
+
+@pytest.mark.parametrize("sql", REFUSED, ids=REFUSED)
+def test_what_q_cannot_match_is_refused(sql):
+    with pytest.raises(sqlglot.errors.UnsupportedError):
+        sqlglot.transpile(sql, read="duckdb", write="q")
+
 
 REFUSED_READ = [
     # `k xkey q and n!q may repeat a key, which lj matches once and SQL's

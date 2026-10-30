@@ -47,6 +47,19 @@ CASES = [
     ("CREATE TABLE IF NOT EXISTS w (a BIGINT); INSERT INTO w VALUES (1)", "SELECT a FROM w"),
     ("CREATE VIEW vw AS SELECT g, v FROM u WHERE v > 15", "SELECT g, v FROM vw"),
     ("CREATE OR REPLACE TABLE u AS SELECT g, n AS v FROM t WHERE n > 5", "SELECT g, v FROM u"),
+    # A statement's own WITH, written in.
+    (
+        "WITH q AS (SELECT g, n FROM t WHERE n > 2) INSERT INTO u SELECT g, n FROM q",
+        "SELECT g, v FROM u",
+    ),
+    (
+        "WITH q AS (SELECT g FROM u WHERE v > 15) UPDATE t SET n = 0 WHERE g IN (SELECT g FROM q)",
+        "SELECT g, n FROM t",
+    ),
+    (
+        "WITH q AS (SELECT g FROM u) DELETE FROM t WHERE g IN (SELECT g FROM q)",
+        "SELECT g, n FROM t",
+    ),
     # Already right, kept so they stay so.
     ("UPDATE u SET v = v + 1, g = 'q' WHERE v > 15", "SELECT g, v FROM u"),
     ("DELETE FROM t WHERE g IN (SELECT g FROM u)", "SELECT g, n FROM t"),
