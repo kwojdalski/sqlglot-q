@@ -364,10 +364,18 @@ UNLIFTED = (
 )
 
 
+def computed(node: exp.Expr) -> bool:
+    """Whether node holds q text a stage computed (a window's QText): a value
+    per row, though it has no column under it."""
+    return any(type(n).__name__ == "QText" for n in node.walk())
+
+
 def constant(node: exp.Expr) -> bool:
     """A value that is the same on every row: no column, aggregate or query."""
-    return not isinstance(node, exp.Literal) and not node.find(
-        exp.Column, exp.AggFunc, exp.Star, exp.Subquery, exp.Select, exp.Window
+    return (
+        not isinstance(node, exp.Literal)
+        and not node.find(exp.Column, exp.AggFunc, exp.Star, exp.Subquery, exp.Select, exp.Window)
+        and not computed(node)
     )
 
 
@@ -380,6 +388,8 @@ def lifted(node: exp.Expr) -> bool:
     if isinstance(node, (exp.Predicate, exp.Connector)) and not isinstance(node, exp.Like):
         return False  # a comparison of atoms is an atom already
     if node.find(exp.Column, exp.AggFunc, exp.Star, exp.Subquery, exp.Select, exp.Window):
+        return False
+    if computed(node):
         return False
     return any(
         lit.is_string and not isinstance(lit.parent, (exp.Interval, exp.Cast))

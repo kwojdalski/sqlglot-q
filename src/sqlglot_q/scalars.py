@@ -368,8 +368,8 @@ CALLS = [
     ),
     Call(
         exp.Levenshtein,
-        "{" + LEV + "[;y] each string x}",
-        "{" + LEV + "[;y] each x}",
+        "{?[null x;0N;" + LEV + "[;y] each string x]}",
+        "{{$[count x;" + LEV + "[x;y];0N]}[;y] each x}",  # '' is NULL
         keys=("this", "expression"),
         chars=("expression",),
     ),

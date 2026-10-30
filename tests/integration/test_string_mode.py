@@ -89,6 +89,13 @@ QUERIES = [
     "SELECT a, w FROM s WHERE (w, a) IN (SELECT w, a FROM s WHERE a < 3)",
     "SELECT a, GREATEST(w, v) AS g, LEAST(w, v) AS l, GREATEST(w, v, 'q') AS h FROM s",
     "SELECT a, NULLIF(w, v) AS n, NULLIF(w, w) AS m FROM s",
+    # The third sweep's functions, in their string forms; a NULL's distance
+    # is NULL.
+    "SELECT a, UNICODE(w) AS u, LEVENSHTEIN(w, 'abc') AS l, BIT_LENGTH(w) AS b FROM s",
+    "SELECT a, TRANSLATE(w, 'ab', 'x') AS t, MD5(v) AS m FROM s",
+    "SELECT a, REGEXP_REPLACE(w, 'b', 'X') AS r FROM s",
+    "SELECT w, STRING_AGG(v, ',' ORDER BY v DESC) AS l FROM s GROUP BY w",
+    "SELECT a, w, CASE WHEN ROW_NUMBER() OVER (ORDER BY a) = 1 THEN w ELSE v END AS k FROM s",
 ]
 
 

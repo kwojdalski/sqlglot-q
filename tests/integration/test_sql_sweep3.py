@@ -34,6 +34,9 @@ QUERIES = [
     "SELECT BIT_LENGTH(s) AS a FROM t",
     "SELECT STRING_SPLIT(s, '_') AS a FROM t",
     "SELECT TRUNC(x, 1) AS a, TRUNC(n, -1) AS b FROM t",
+    # A window in a CASE: a value per row, not a constant to lift.
+    "SELECT g, n, CASE WHEN ROW_NUMBER() OVER (PARTITION BY g ORDER BY n) = 1 "
+    "THEN 'first' ELSE 'rest' END AS k FROM t",
 ]
 
 # On the calendar table, which has a boolean column f.

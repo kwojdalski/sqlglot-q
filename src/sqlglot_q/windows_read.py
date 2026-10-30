@@ -111,6 +111,9 @@ def window_stage(parser, items, keys, source) -> exp.Expr:
             for key, child in list(node.args.items()):
                 if isinstance(child, exp.Expr):
                     node.set(key, convert(child))
+                elif isinstance(child, list):
+                    # CASE's WHENs, a function's arguments
+                    node.set(key, [convert(c) if isinstance(c, exp.Expr) else c for c in child])
             return node
 
         body = convert(value.copy())
