@@ -53,7 +53,9 @@ def faithful(node: exp.Expr, filter: bool = False) -> exp.Expr:
     while isinstance(node, exp.Paren):
         node = node.this
     if node.meta.get("guarded"):
-        return node  # the generator's guard: SQL's own comparison
+        # The generator's guard: SQL's own comparison where SQL keeps rows on
+        # it; as a value (and under NOT), false on a null, not unknown.
+        return node if filter else exp.Coalesce(this=node, expressions=[exp.false()])
     if isinstance(node, (exp.And, exp.Or)):
         return type(node)(
             this=faithful(node.this, filter), expression=faithful(node.expression, filter)

@@ -148,6 +148,8 @@ def fails(gen: QGenerator, node: exp.Expr) -> str:
     if isinstance(node, exp.Or):
         return f"({fails(gen, node.this)})&({fails(gen, node.expression)})"
     if isinstance(node, exp.Is):
+        if isinstance(node.expression, exp.Boolean):
+            return f"not ({gen.sql(node)})"  # c IS TRUE is never unknown
         return f"not {gen.sql(node)}"
     if isinstance(node, exp.In):
         query = node.args.get("query")

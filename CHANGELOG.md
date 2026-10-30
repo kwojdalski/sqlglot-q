@@ -2,6 +2,53 @@
 
 ## Unreleased
 
+A second sweep of 101 problems, each with its case in
+`tests/integration/test_sql_sweep2.py`, `test_statements.py` (statements run
+in q and DuckDB, the table they leave compared), the string-mode and
+calendar files, or `tests/test_q.py`.
+
+Wrong answers, silently:
+
+- `UPDATE ... FROM` and `DELETE ... USING` read `t.k = u.k` as `k=k`: every
+  row (refused); `CREATE TABLE IF NOT EXISTS` replaced an existing table.
+- A join's sides sharing a column name (`SELECT t.g FROM t CROSS JOIN u`,
+  `ej`'s non-key columns): q keeps the right side's. Each side now leaves out
+  what the query reads from another, and the reader qualifies it back.
+- `LEFT(s, -n)`; `COALESCE(n <= 2, FALSE)` was true on a null `n`; and reading
+  q, `not (not null n)&n<=2` as `NOT (n <= 2)`, which drops the null rows q
+  keeps.
+
+q errors on SQL that should translate:
+
+- `INSERT ... SELECT` by position, `INSERT (cols) SELECT`, a `NULL` into a
+  symbol column, one column of several rows; `UPDATE` changing a column's
+  type (`v / 3`) and `SET c = NULL`.
+- Ranks of several order keys; `n AS "my col"`.
+- String mode: joins on a text key, any constant text in a select, text
+  windows (`LAST_VALUE`, `NTH_VALUE`, `COUNT(DISTINCT)`), row values,
+  `GREATEST`/`LEAST` and `NULLIF` of text columns, a grouping set's text key.
+
+Now translated: correlated `UPDATE ... SET c = (SELECT ...)`, `ALTER TABLE`
+(add, rename, drop columns; rename), `CREATE VIEW`, `VALUES` tables, `ROLLUP`,
+`CUBE`, `GROUPING SETS`, named windows, windows over a grouped result,
+`ORDER BY` after `INTERSECT`/`EXCEPT`, `LAST_VALUE`/`NTH_VALUE` to the current
+row, `COUNT(DISTINCT) OVER`, `SUM(DISTINCT) OVER`, `FIRST`/`LAST OVER`,
+`STRING_AGG`/`ARRAY_AGG` with `ORDER BY` or `DISTINCT`, `FILTER` on any
+aggregate, `IS TRUE`/`IS FALSE`, `LIKE ANY`, `REGEXP_REPLACE` of plain text,
+`COUNT(DISTINCT a, b)`, `UNNEST` of a list; math (trig, `ATAN2`, `DEGREES`,
+`CBRT`, `FACTORIAL`, `GCD`, `LCM`, `EVEN`, `ISINF`), bits (`& | xor << >> ~`,
+`BIT_COUNT`, `BIT_AND`/`OR`/`XOR`), `TRY_CAST`, `CONCAT_WS`, `TRANSLATE`,
+`MD5`, `KURTOSIS`, `SKEWNESS`, `PRODUCT`, `QUANTILE_DISC`, `... WITHIN GROUP`;
+dates (`DATE_ADD`/`DATE_SUB`, `DATE_PART`, `DAYOFMONTH`, `WEEKDAY`, `ISODOW`,
+`YEARWEEK`, `MONTHNAME`, `MAKE_TIMESTAMP`, `STRPTIME`, `CURRENT_TIME`,
+`DATE_DIFF` in weeks, milliseconds and microseconds, composite intervals,
+`EXTRACT` of ISO parts, decades, centuries, millennia and microseconds,
+`DATE_TRUNC` to a decade, century or millennium).
+
+Reading q: `sym in `a`, an aggregate beside the rows' columns (`OVER ()`),
+`div`, `select[m n]`, a sort or `sublist` of a table, `fby` (as `QUALIFY`),
+running functions in a select over a sorted table, `x::select ...` views.
+
 A sweep of 50 problems, each with its case in
 `tests/integration/test_sql_sweep.py` (or the string-mode and calendar
 files) and round-tripped.

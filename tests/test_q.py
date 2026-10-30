@@ -261,6 +261,22 @@ class TestTemporal(Validator):
         # q counts buckets from 2000.01.01, DuckDB from 2000-01-03.
         self.refuses("SELECT TIME_BUCKET(INTERVAL '7 minutes', ts) FROM t", "divide a day")
 
+    def test_forms_duckdb_does_not_have(self):
+        # Postgres' LIKE ANY (...), MySQL's COUNT(DISTINCT a, b) (the distinct
+        # pairs with no null part).
+        q = sqlglot.transpile(
+            "SELECT a FROM t WHERE b LIKE ANY ('x%', 'y%')", read="postgres", write="q"
+        )
+        self.assertEqual(q[0], 'select a from t where (b like "x*")|(b like "y*")')
+        q = sqlglot.transpile("SELECT COUNT(DISTINCT a, b) FROM t", read="mysql", write="q")[0]
+        self.assertIn("count distinct (flip x) where not max n each x", q)
+        self.validate(
+            "SELECT a FROM t WHERE b IS NOT DISTINCT FROM NULL", "select a from t where null b"
+        )
+        self.validate(
+            "SELECT a FROM t WHERE b IS DISTINCT FROM NULL", "select a from t where not null b"
+        )
+
     def test_mysql_date_sub_and_current_time(self):
         # MySQL's DATE_SUB(d, INTERVAL ...), which DuckDB has no form of.
         q = sqlglot.transpile("SELECT DATE_SUB(d, INTERVAL 2 DAY) FROM t", read="mysql", write="q")

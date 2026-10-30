@@ -102,6 +102,21 @@ QUERIES = [
     "SELECT g, STRING_AGG(s, ',') FILTER (WHERE n > 0) AS a FROM t GROUP BY g",
     "SELECT g, SUM(n * o) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
     "SELECT g, COUNT(n) FILTER (WHERE o > 1) AS c FROM t GROUP BY g",
+    # IS TRUE and IS FALSE, never unknown.
+    "SELECT g, n FROM t WHERE (n > 2) IS TRUE",
+    "SELECT g, n FROM t WHERE (n > 2) IS NOT TRUE",
+    "SELECT g, n FROM t WHERE (n > 2) IS FALSE",
+    "SELECT g, n FROM t WHERE (n > 2) IS NOT FALSE",
+    # REGEXP_REPLACE of plain text: the first match, or every one with 'g'.
+    "SELECT g, REGEXP_REPLACE(s, 'b', 'X') AS r FROM t",
+    "SELECT g, REGEXP_REPLACE(s, 'b', 'X', 'g') AS r FROM t",
+    # UNNEST of a list, as a table.
+    "SELECT UNNEST([1, 2, 3]) AS x",
+    "SELECT g, n FROM t WHERE n IN (SELECT UNNEST([1, 3, 5]))",
+    # COALESCE of a condition: q's comparison is never null, so ^ filled
+    # nothing and a null n was q's 0N<=2, true.
+    "SELECT n, COALESCE(n <= 2, FALSE) AS a, COALESCE(n > 2, TRUE) AS b FROM t",
+    "SELECT g, n FROM t WHERE NOT COALESCE(n <= 2, FALSE)",
 ]
 
 # Translated, but read back from q only as far as SQL can: one way.
@@ -120,6 +135,7 @@ ONE_WAY = {
     "SELECT g, STRING_AGG(s, ',') FILTER (WHERE n > 0) AS a FROM t GROUP BY g",
     "SELECT g, SUM(n * o) FILTER (WHERE o > 1) AS a FROM t GROUP BY g",
     "SELECT g, COUNT(n) FILTER (WHERE o > 1) AS c FROM t GROUP BY g",
+    "SELECT g, n FROM t WHERE n IN (SELECT UNNEST([1, 3, 5]))",
 }
 
 
@@ -161,6 +177,13 @@ READ_RUN = [
     "select sym, qty, cumq:sums qty from `time xasc trades",
     "select sym, px, chg:px-prev px from `time xasc trades",
     "select sym, mx:maxs px from `time xasc trades",
+]
+
+
+READ_RUN += [
+    # A guarded comparison under not: q's is false on a null, so not keeps
+    # the row; read as NOT (n <= 2) it would not.
+    "select from trades where not (not null qty)&qty<=100",
 ]
 
 

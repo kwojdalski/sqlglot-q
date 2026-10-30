@@ -29,6 +29,7 @@ from sqlglot_q.generator import (
     BOOL_AND,
     BOOL_OR,
     BUCKET,
+    COUNT_ROWS,
     CUME_DIST,
     DOW,
     DOY,
@@ -63,6 +64,7 @@ from sqlglot_q.generator import (
     PERCENT_RANK,
     QUARTER,
     REPLACE,
+    REPLACE_FIRST,
     RESERVED,
     REVERSE,
     RIGHT,
@@ -611,6 +613,8 @@ class Statement:
             and call.aggregate
         ):
             return arg.this  # first enlist f[...]: an aggregate of scalars.py
+        if word == "first" and isinstance(arg, Enlisted) and isinstance(arg.this, exp.Count):
+            return arg.this  # first enlist COUNT_ROWS[...]: COUNT(DISTINCT a, b)
         if (
             word == "first"
             and isinstance(arg, Enlisted)
@@ -820,6 +824,25 @@ class Statement:
             self.expect("]")
             term = exp.Ordered(this=literal(key), desc=desc, nulls_first=first)
             return exp.Order(this=literal(value), expressions=[term])
+        if text == COUNT_ROWS and self.is_("["):
+            self.expect("[")
+            parts = self.expr(set())
+            self.expect("]")
+            items = parts.args["items"] if isinstance(parts, Rows) else [parts]
+            return exp.Count(this=exp.Distinct(expressions=[literal(i) for i in items]))
+        if text in REPLACE_FIRST and self.is_("["):
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            if len(args) != 3:
+                self.fail("REGEXP_REPLACE is read with three arguments")
+            value, pattern, replacement = (literal(a) for a in args)
+            return exp.RegexpReplace(
+                this=value, expression=pattern, replacement=replacement, single_replace=True
+            )
         if text == NULLIF_ANY and self.is_("["):
             self.expect("[")
             value = self.expr(set())

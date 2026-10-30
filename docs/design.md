@@ -251,6 +251,13 @@ becomes `0!select ... by`); the second must not.
   side's qualified key), and correlated subqueries other than
   `EXISTS (... WHERE inner.k = outer.k ...)` and a one-key aggregate are
   refused.
+- Some translations read back from q only as far as SQL can, one way:
+  `ROLLUP`/`CUBE`/`GROUPING SETS`, `CONCAT_WS`, `FILTER` on aggregates other
+  than `SUM`/`COUNT`/`AVG`/`MIN`/`MAX`, a correlated `UPDATE ... SET`, `ALTER
+  TABLE`, `CREATE TABLE IF NOT EXISTS`.
+- `REGEXP_REPLACE` is translated for a plain-text pattern only; `STRPTIME`
+  for the ISO forms q parses; `TO_TIMESTAMP` (a time zone's type) and `AGE`
+  are refused.
 - `FIRST` and `LAST` (DuckDB's) are q's `first` and `last`: the first and
   last row in the table's order, which SQL only promises for a plain scan.
 - `(a, b) IN (SELECT ...)` compares rows as q tables do, by type: a long

@@ -134,6 +134,15 @@ ANY_FILL = "{$[0h=type x;{$[0=count x;y;x]}'[x;y];y^x]}"
 # A window's one value per partition, over its rows: update spreads an atom,
 # but one string is a list of characters.
 TEXT_SPREAD = "{$[10h=type y;(count x)#enlist y;y]}"
+COUNT_ROWS = (
+    "{n:{$[0h=type x;0=count each x;null x]};count distinct (flip x) where not max n each x}"
+)
+# REGEXP_REPLACE of plain text, its first match only (no 'g' flag): q's ss
+# finds it.
+REPLACE_FIRST = (
+    "{`${$[count w:x ss y;((first w)#x),z,(count[y]+first w)_x;x]}[;y;z] each string x}",
+    "{{$[count w:x ss y;((first w)#x),z,(count[y]+first w)_x;x]}[;y;z] each x}",
+)
 # NULLIF(a, b) of two columns in string mode: a, its null (an index past
 # the end, "" for strings) where y holds.
 NULLIF_ANY = "{@[x;w;:;(count w:where y)#enlist x count x]}"
@@ -670,11 +679,44 @@ class QGenerator(Generator):
     and_sql = or_sql = connector
 
     def nullsafeeq_sql(self, node) -> str:
+        # x IS NOT DISTINCT FROM NULL is x IS NULL.
+        null, other = null_side(node)
+        if null is not None:
+            return self.sql(exp.Is(this=other.copy(), expression=exp.Null()))
         # q's = is already null-safe: 0N=0N is true, 0N=1 false.
         return self.sql(exp.EQ(this=node.this.copy(), expression=node.expression.copy()))
 
     def nullsafeneq_sql(self, node) -> str:
+        null, other = null_side(node)
+        if null is not None:
+            return self.sql(exp.Not(this=exp.Is(this=other.copy(), expression=exp.Null())))
         return self.sql(exp.NEQ(this=node.this.copy(), expression=node.expression.copy()))
+
+    def regexpreplace_sql(self, node: exp.RegexpReplace) -> str:
+        pattern, replacement = node.expression, node.args.get("replacement")
+        flags = node.args.get("modifiers")
+        plain = (
+            isinstance(pattern, exp.Literal)
+            and pattern.is_string
+            and pattern.this
+            and not any(c in pattern.this for c in ".*+?()[]{}|^$\\")
+        )
+        if not plain or not (isinstance(replacement, exp.Literal) and replacement.is_string):
+            return self.refuse("REGEXP_REPLACE is translated for a plain-text pattern")
+        if "\\" in replacement.this or any(node.args.get(k) for k in ("position", "occurrence")):
+            return self.refuse("REGEXP_REPLACE is translated without backreferences")
+        if flags is not None and flags.name != "g":
+            return self.refuse("REGEXP_REPLACE is translated with no flags or 'g'")
+        if not node.args.get("single_replace") or flags is not None:
+            # Every match (sqlglot's REGEXP_REPLACE, DuckDB's with 'g').
+            return self.sql(
+                exp.Replace(
+                    this=node.this.copy(), expression=pattern.copy(), replacement=replacement.copy()
+                )
+            )
+        fn = REPLACE_FIRST[0] if self.symbols else REPLACE_FIRST[1]
+        args = (self.sql(node.this), self.chars(pattern.this), self.chars(replacement.this))
+        return f"{fn}[{';'.join(args)}]"
 
     def groupconcat_sql(self, node) -> str:
         sep = node.args.get("separator")
@@ -783,7 +825,12 @@ class QGenerator(Generator):
     def is_sql(self, node: exp.Is) -> str:
         if isinstance(node.expression, exp.Null):
             return self.is_null(self.sql(node.this))
-        return self.refuse("IS is only translated for IS NULL and IS NOT NULL")
+        if isinstance(node.expression, exp.Boolean):
+            # c IS TRUE: where c is true, never unknown; IS FALSE where false.
+            from sqlglot_q.truth import fails, holds
+
+            return holds(self, node.this) if node.expression.this else fails(self, node.this)
+        return self.refuse("IS is only translated for IS NULL, IS TRUE and IS FALSE")
 
     def in_sql(self, node: exp.In) -> str:
         items = node.expressions
@@ -836,6 +883,9 @@ class QGenerator(Generator):
 
     def like_sql(self, node: exp.Like) -> str:
         pattern = node.expression
+        if isinstance(pattern, exp.Any) and isinstance(pattern.this, exp.Tuple):
+            # s LIKE ANY ('a%', 'b%'): any of the likes.
+            return self.any_like(node, type(node))
         if not (isinstance(pattern, exp.Literal) and pattern.is_string):
             # A pattern per row: each made q's when the query runs.
             text = f"string {self.operand(pattern)}" if self.symbols else self.sql(pattern)
@@ -864,8 +914,20 @@ class QGenerator(Generator):
             return f"(lower {self.sql(test.this)}) like {self.chars(text)}"
         return f"{self.operand(test.this)} like {self.chars(like_pattern(sql, escape.this))}"
 
+    def any_like(self, node: exp.Expr, kind) -> str:
+        tests = [
+            kind(this=node.this.copy(), expression=p.copy())
+            for p in node.expression.this.expressions
+        ]
+        either = tests[0]
+        for test in tests[1:]:
+            either = exp.Or(this=either, expression=test)
+        return self.sql(either)
+
     def ilike_sql(self, node: exp.ILike) -> str:
         pattern = node.expression
+        if isinstance(pattern, exp.Any) and isinstance(pattern.this, exp.Tuple):
+            return self.any_like(node, type(node))
         if not (isinstance(pattern, exp.Literal) and pattern.is_string):
             return self.refuse("ILIKE is only translated with a literal pattern")
         text = like_pattern(pattern.this.lower())
@@ -891,6 +953,10 @@ class QGenerator(Generator):
         if arg is None or isinstance(arg, exp.Star):
             return "count i"
         if isinstance(arg, exp.Distinct):
+            if len(arg.expressions) > 1:
+                # COUNT(DISTINCT a, b): the distinct rows with no null part.
+                items = ";".join(self.sql(e) for e in arg.expressions)
+                return f"first enlist {COUNT_ROWS}[({items})]"
             if len(arg.expressions) != 1:
                 return self.refuse("COUNT(DISTINCT ...) is only translated for one column")
             col = self.operand(arg.expressions[0])
@@ -1197,6 +1263,14 @@ class QGenerator(Generator):
         if q_like is not None:
             # COALESCE(n > 3, FALSE) is what q's n>3 is, nulls and all.
             return self.sql(q_like)
+        if len(items) == 2 and isinstance(items[1], exp.Boolean) and condition_like(items[0]):
+            # COALESCE(c, FALSE): where c is true; COALESCE(c, TRUE): where it
+            # is not false. (q's comparison is never null: ^ would not fill.)
+            from sqlglot_q.truth import fails, holds
+
+            if items[1].this:
+                return f"not {fails(self, items[0])}"  # q reads not of all of it
+            return holds(self, items[0])
         if (
             not self.symbols
             and len(items) == 2
@@ -1906,6 +1980,15 @@ def correlated_lookup(gen, update: exp.Update, value: exp.Expr) -> str | None:
     return f"0^{text}" if isinstance(agg, exp.Count) else text
 
 
+def null_side(node: exp.Expr):
+    """(the NULL, the other side) of x IS [NOT] DISTINCT FROM NULL, or Nones."""
+    if isinstance(node.expression, exp.Null):
+        return node.expression, node.this
+    if isinstance(node.this, exp.Null):
+        return node.this, node.expression
+    return None, None
+
+
 def condition_like(node: exp.Expr) -> bool:
     """A comparison, a test or a connective of them: true or false as it reads."""
     while isinstance(node, exp.Paren):
@@ -1986,12 +2069,14 @@ def _select_rewrites():
         expand_group_by_all,
         grouping_sets,
         join_conditions,
+        like_any,
         named_windows,
         order_by_expression,
         q_names,
         quantified_in,
         regex_like,
         table_star,
+        unnest_list,
         window_over_group,
     )
 
@@ -1999,6 +2084,8 @@ def _select_rewrites():
     # ON become a window in a subquery, which the window stages translate.
     return transforms.preprocess(
         [
+            unnest_list,
+            like_any,
             named_windows,
             grouping_sets,
             window_over_group,

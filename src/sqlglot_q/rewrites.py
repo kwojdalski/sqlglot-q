@@ -546,3 +546,49 @@ def grouping_sets(expression: exp.Expr) -> exp.Expr:
         if expression.args.get(key):
             node.set(key, expression.args[key].copy())
     return node
+
+
+def unnest_list(expression: exp.Expr) -> exp.Expr:
+    """SELECT UNNEST([1, 2, 3]) AS x, with no FROM: the rows of the list,
+    SELECT x FROM (VALUES (1), (2), (3)) AS q_u(x)."""
+    if not isinstance(expression, exp.Select) or expression.args.get("from_"):
+        return expression
+    if len(expression.expressions) != 1:
+        return expression
+    item = expression.expressions[0]
+    value = item.this if isinstance(item, exp.Alias) else item
+    if not (isinstance(value, exp.Explode) and isinstance(value.this, exp.Array)):
+        return expression
+    name = item.alias if isinstance(item, exp.Alias) else "unnest"
+    rows = [exp.Tuple(expressions=[v.copy()]) for v in value.this.expressions]
+    if not rows:
+        return expression
+    alias = exp.TableAlias(this=exp.to_identifier("q_u"), columns=[exp.to_identifier(name)])
+    source = exp.Values(expressions=rows, alias=alias)
+    node = exp.Select(expressions=[exp.column(name)]).from_(source, copy=False)
+    for key in ("where", "order", "limit", "offset", "distinct"):
+        if expression.args.get(key):
+            node.set(key, expression.args[key].copy())
+    return node
+
+
+def like_any(expression: exp.Expr) -> exp.Expr:
+    """s LIKE ANY ('a%', 'b%'): s LIKE 'a%' OR s LIKE 'b%'."""
+    if not isinstance(expression, exp.Select):
+        return expression
+
+    def rewrite(node: exp.Expr) -> exp.Expr:
+        if not isinstance(node, (exp.Like, exp.ILike)):
+            return node
+        pattern = node.expression
+        if not (isinstance(pattern, exp.Any) and isinstance(pattern.this, exp.Tuple)):
+            return node
+        tests = [
+            type(node)(this=node.this.copy(), expression=p.copy()) for p in pattern.this.expressions
+        ]
+        either = tests[0]
+        for test in tests[1:]:
+            either = exp.Or(this=either, expression=test)
+        return exp.Paren(this=either)
+
+    return expression.transform(rewrite)
