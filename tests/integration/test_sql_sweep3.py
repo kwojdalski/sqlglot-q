@@ -37,6 +37,8 @@ QUERIES = [
     # A window in a CASE: a value per row, not a constant to lift.
     "SELECT g, n, CASE WHEN ROW_NUMBER() OVER (PARTITION BY g ORDER BY n) = 1 "
     "THEN 'first' ELSE 'rest' END AS k FROM t",
+    # UNION ALL BY NAME: q's uj.
+    "SELECT g, n FROM t UNION ALL BY NAME SELECT v, g FROM u",
 ]
 
 # On the calendar table, which has a boolean column f.
@@ -89,7 +91,30 @@ READ_RUN = [
     "?[trades;();(enlist `sym)!enlist `sym;`mx`tot!((max;`px);(sum;`qty))]",
     "?[trades;enlist (<;`px;2);0b;`sym`px!`sym`px]",
     "?[trades;();1b;(enlist `sym)!enlist `sym]",
+    # lj and ij with a keyed grouping (its keys once each): LEFT and inner
+    # joins; uj of two tables, UNION ALL BY NAME; a join on its own.
+    "trades lj select b:max bid by sym from quotes",
+    "select sym, px, b from trades lj select b:max bid by sym from quotes",
+    "trades ij select b:max bid by sym from quotes",
+    "select from (trades ij select b:max bid by sym from quotes) where b>2",
+    "trades lj `sym xkey select b:max bid by sym from quotes",
+    "(select sym, px from trades) uj select sym, bid from quotes",
+    "aj[`sym`time;trades;quotes]",
+    "ej[`sym;trades;select sym, bp:bid from quotes]",
 ]
+
+REFUSED_READ = [
+    # `k xkey q and n!q may repeat a key, which lj matches once and SQL's
+    # join every time.
+    "trades lj `sym xkey select sym, b:bid from quotes",
+    "trades lj 1!select sym, b:bid from quotes",
+]
+
+
+@pytest.mark.parametrize("q", REFUSED_READ, ids=REFUSED_READ)
+def test_q_without_a_sql_form_is_refused(q):
+    with pytest.raises(sqlglot.errors.ParseError):
+        sqlglot.transpile(q, read="q", write="duckdb")
 
 
 @pytest.mark.parametrize("q", READ_RUN, ids=READ_RUN)

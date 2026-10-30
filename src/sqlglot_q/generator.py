@@ -1551,6 +1551,12 @@ class QGenerator(Generator):
     def union_sql(self, node: exp.Union) -> str:
         from sqlglot_q.query import limited, order_terms, output_names, sort
 
+        if node.args.get("by_name"):
+            if node.args.get("distinct"):
+                return self.refuse("UNION BY NAME without ALL has no q translation here")
+            # UNION ALL BY NAME: q's uj, the columns matched by name.
+            both = f"{self.operand_query(node.this)} uj {self.operand_query(node.expression)}"
+            return limited(self, node, both)
         both = f"{self.operand_query(node.this)},{self.operand_query(aligned(node))}"
         text = both if not node.args.get("distinct") else f"distinct {both}"
         # ORDER BY and LIMIT after a UNION belong to the union, and name the

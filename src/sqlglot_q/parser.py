@@ -150,6 +150,8 @@ KEYWORD_DYADS = {
     "xdesc",
     "sublist",
     "lj",
+    "ij",
+    "uj",
     "xkey",
     "cross",
     "inter",
@@ -390,6 +392,9 @@ class Statement:
                 table(self, node.this.name), copy=False
             )
             node.set("order", order)
+        if isinstance(node, Joined):
+            # aj[...], ej[...] or t lj k on its own: every column of the join.
+            node = select(self, [], [], node, None, False)
         if isinstance(node, Exec):
             # exec c from t, on its own: the values of the one column, which
             # SQL returns as the rows of SELECT c.
@@ -1156,7 +1161,7 @@ class Statement:
         if len(items) > 1:
             return Rows(items=items)
         inner = items[0]
-        if is_query(inner) or isinstance(inner, (exp.Subquery, Sorted, Renamed)):
+        if is_query(inner) or isinstance(inner, (exp.Subquery, Sorted, Renamed, Joined)):
             return inner
         if isinstance(inner, Joins):
             return concat(self, inner)  # (w,'v): text joined, in string mode
@@ -1562,8 +1567,27 @@ class Statement:
                 else [r.this for r in left.args["items"]]
             )
             return Keyed(this=right, keys=keys)
-        if op == "lj" and isinstance(right, Keyed):
-            return Joined(this=left, expression=right.this, keys=right.args["keys"], side="LEFT")
+        if op == "!" and isinstance(left, exp.Literal) and left.this.isdigit() and is_query(right):
+            # n!q: q keyed on its first n columns.
+            names = [i.alias_or_name for i in right.expressions][: int(left.this)]
+            if len(names) != int(left.this) or not all(names):
+                self.fail("n!q is read when q names its first n columns")
+            return Keyed(this=right, keys=names)
+        if op in ("lj", "ij"):
+            keyed = keyed_of(right)
+            if keyed is None and isinstance(bare(right), Keyed):
+                # `k xkey q, n!q: keys q may repeat, and lj takes the first
+                # match where SQL's join takes every one.
+                self.fail(f"{op} is read with a table keyed by a grouping (select ... by k)")
+            if keyed is not None:
+                # lj with a keyed table (a select by k is keyed on k): a LEFT
+                # JOIN on the keys, which match once; ij an inner join.
+                query, keys = keyed
+                side = "LEFT" if op == "lj" else ""
+                return Joined(this=left, expression=query, keys=keys, side=side)
+        if op == "uj" and is_query(bare(left)) and is_query(bare(right)):
+            # x uj y: the rows of both, columns matched by name.
+            return exp.Union(this=bare(left), expression=bare(right), distinct=False, by_name=True)
         if op == "cross":
             return Joined(this=left, expression=right, keys=[], side="CROSS")
         if op == "xcol":
@@ -2231,6 +2255,21 @@ def whole_table_windows(cols: list[exp.Expr]) -> list[exp.Expr]:
         return node
 
     return [c.transform(over) for c in cols]
+
+
+def keyed_of(node: exp.Expr):
+    """(query, keys) of a keyed table whose keys are each once: a grouping,
+    select ... by k (or `k xkey of one), keyed on its keys."""
+    node = bare(node)
+    if isinstance(node, Keyed):
+        query, keys = node.this, node.args["keys"]
+        inner = keyed_of(query)
+        return (query, keys) if inner is not None and inner[1] == keys else None
+    if isinstance(node, exp.Select) and node.args.get("group"):
+        keys = [k.alias_or_name for k in node.args["group"].expressions]
+        if all(isinstance(k, exp.Column) for k in node.args["group"].expressions):
+            return node, keys
+    return None
 
 
 def first_last(item: exp.Expr) -> exp.Expr:
