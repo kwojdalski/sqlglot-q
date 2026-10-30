@@ -723,6 +723,16 @@ def enclosed(text: str) -> bool:
 def limited(gen: QGenerator, node: exp.Select, text: str) -> str:
     limit = node.args.get("limit")
     offset = node.args.get("offset")
+    if isinstance(limit, exp.Fetch):
+        # FETCH FIRST n ROWS ONLY: LIMIT n (WITH TIES and PERCENT have no form).
+        options = limit.args.get("limit_options")
+        ties = options is not None and (
+            options.args.get("with_ties") or options.args.get("percent")
+        )
+        if ties or limit.args.get("with_ties") or limit.args.get("percent"):
+            return gen.refuse("FETCH ... WITH TIES or PERCENT has no q translation here")
+        count = limit.args.get("count") or exp.Literal.number(1)
+        limit = exp.Limit(expression=count)
     n = gen.sql(limit.expression) if limit is not None else None
     m = gen.sql(offset.expression) if offset is not None else None
     # sublist, not #: n#t repeats t's rows when it has fewer than n.

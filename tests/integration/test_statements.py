@@ -58,8 +58,8 @@ CASES = [
 ]
 
 
-def run_in_q(statements: list[str], check: str) -> list[tuple] | str:
-    setup = "".join(f"{name}:{q_table(cols)};\n" for name, cols in DATA.items())
+def run_in_q(statements: list[str], check: str, data=DATA) -> list[tuple] | str:
+    setup = "".join(f"{name}:{q_table(cols)};\n" for name, cols in data.items())
     lines = ['system "P 0";', setup]
     for q in statements:
         lines.append(f"@[value;{q_string(q)};{{-1 .j.j `ok`error!(0b;x);exit 0}}];")
@@ -83,6 +83,36 @@ def test_statement_leaves_what_duckdb_leaves(sql, check):
     got = run_in_q(qs, sqlglot.transpile(check, read="duckdb", write="q")[0])
     assert not isinstance(got, str), f"q refused {qs}: {got}"
     con = duckdb_connection(DATA)
+    for s in statements:
+        con.execute(s)
+    expected = [tuple(r) for r in con.execute(check).fetchall()]
+    assert same(got, expected, False), f"{qs}\nq:      {got}\nduckdb: {expected}"
+
+
+# String mode: a string is a list of characters, one value per row there.
+STRING_CASES = [
+    ("INSERT INTO s VALUES (9, NULL, 'zz'), (10, 'q', NULL)", "SELECT a, w, v FROM s"),
+    ("UPDATE s SET w = 'up' WHERE a > 3", "SELECT a, w FROM s"),
+    ("UPDATE s SET w = NULL WHERE a = 1", "SELECT a, w FROM s"),
+    ("UPDATE s SET w = UPPER(v)", "SELECT a, w FROM s"),
+    (
+        "ALTER TABLE s ADD COLUMN z VARCHAR; UPDATE s SET z = 'q' WHERE a > 3",
+        "SELECT a, z FROM s",
+    ),
+    ("DELETE FROM s WHERE w IS NULL", "SELECT a, w FROM s"),
+]
+
+
+@pytest.mark.parametrize(("sql", "check"), STRING_CASES, ids=[s for s, _ in STRING_CASES])
+def test_string_mode_statement_leaves_what_duckdb_leaves(sql, check):
+    from tests.integration.test_string_mode import DATA as STRINGS
+
+    dialect = sqlglot.Dialect.get_or_raise("q, string_literals=string")
+    statements = [s.strip() for s in sql.split(";") if s.strip()]
+    qs = [sqlglot.transpile(s, read="duckdb", write=dialect)[0] for s in statements]
+    got = run_in_q(qs, sqlglot.transpile(check, read="duckdb", write=dialect)[0], STRINGS)
+    assert not isinstance(got, str), f"q refused {qs}: {got}"
+    con = duckdb_connection(STRINGS)
     for s in statements:
         con.execute(s)
     expected = [tuple(r) for r in con.execute(check).fetchall()]

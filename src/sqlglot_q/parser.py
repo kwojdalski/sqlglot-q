@@ -56,6 +56,7 @@ from sqlglot_q.generator import (
     NTH,
     NTH_WHOLE,
     NTILE,
+    NULL_OF,
     NULLIF_ANY,
     NULLS,
     ORDERED,
@@ -2418,6 +2419,7 @@ def insert_forms(text: str) -> str:
     """The generator's insert, in q this reader reads: a column's typed null
     (first 0#t`c) is 0N, an amend of nulls into a vector is the vector with
     them, and (cols t) xcol q, a positional insert, is q."""
+    text = text.replace(NULL_OF + " ", "first 0#")  # string mode's null of a column
     if re.match(r"\s*update ", text):
         # update c:first 0#c: SET c = NULL, the column's own null.
         return re.sub(r"first 0#[A-Za-z]\w*\b", "0N", text)

@@ -152,6 +152,8 @@ REPLACE_FIRST = (
     "{`${$[count w:x ss y;((first w)#x),z,(count[y]+first w)_x;x]}[;y;z] each string x}",
     "{{$[count w:x ss y;((first w)#x),z,(count[y]+first w)_x;x]}[;y;z] each x}",
 )
+# A column's null, of its type: "" for a column of strings, whose 0# is ().
+NULL_OF = '{$[0h=type x;"";first 0#x]}'
 # NULLIF(a, b) of two columns in string mode: a, its null (an index past
 # the end, "" for strings) where y holds.
 NULLIF_ANY = "{@[x;w;:;(count w:where y)#enlist x count x]}"
@@ -1645,7 +1647,7 @@ class QGenerator(Generator):
             def cell(i: int) -> str:
                 values = [row[i] for row in rows]
                 nulls = [n for n, v in enumerate(values) if isinstance(v, exp.Null)]
-                null = f"first 0#{column_of(i)}"
+                null = f"first 0#{column_of(i)}" if self.symbols else f"{NULL_OF} {column_of(i)}"
                 known = [v for v in values if not isinstance(v, exp.Null)]
                 if nulls and known and not any(is_text(v) for v in known):
                     nulls = []  # 70 0N: a number's null is q's 0N already
@@ -1693,7 +1695,14 @@ class QGenerator(Generator):
             col = self.name(e.this.name)
             if isinstance(e.expression, exp.Null):
                 # The column's own null: 0N is a long, 'type into symbols.
-                sets.append(f"{col}:first 0#{col}")
+                if self.symbols:
+                    sets.append(f"{col}:first 0#{col}")
+                else:
+                    sets.append(f"{col}:{TEXT_SPREAD}[i;{NULL_OF} {col}]")
+                continue
+            if not self.symbols and (is_text(e.expression) or constant(e.expression)):
+                # A string is a list of characters: one value per row.
+                sets.append(f"{col}:{TEXT_SPREAD}[i;{self.sql(e.expression)}]")
                 continue
             lookup = correlated_lookup(self, node, e.expression)
             value = lookup if lookup is not None else self.sql(e.expression)
