@@ -216,6 +216,22 @@ def function(parser, value, order, non_null, QCall):
         return exp.PercentRank(), None, True
     if isinstance(value, QCall) and value.args["fn"] == "cume_dist":
         return exp.CumeDist(), exp.WindowSpec(**ROWS), True
+    if isinstance(value, QCall) and value.args["fn"] == "lastrow":
+        # The row's own value: ROWS to the current row (RANGE once its
+        # peers share their last, which the tie stage says).
+        return exp.LastValue(this=value.this), exp.WindowSpec(**ROWS), True
+    if isinstance(value, QCall) and value.args["fn"] in ("nth", "nthwhole"):
+        nth = exp.NthValue(this=value.this, offset=value.args["n"])
+        if value.args["fn"] == "nthwhole":
+            whole = exp.WindowSpec(
+                kind="ROWS",
+                start="UNBOUNDED",
+                start_side="PRECEDING",
+                end="UNBOUNDED",
+                end_side="FOLLOWING",
+            )
+            return nth, whole, True
+        return nth, exp.WindowSpec(**ROWS), True
     if isinstance(value, QCall) and value.args["fn"].startswith("frame_"):
         # A ROWS frame a to b rows off the current one; 0N is unbounded.
         def bound(node, start):

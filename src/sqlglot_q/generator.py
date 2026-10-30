@@ -247,6 +247,12 @@ TUPLE_IN = (
 LIKE_EACH = '{x like\' {raze {$[x="%";"*";x="_";"?";x in "*?[]";"[",x,"]";x]} each x} each y}'
 # A ROWS frame from a to b rows off the current one (0N: unbounded), each
 # row's slice of its partition aggregated without its nulls; NULL over none.
+# Windows: LAST_VALUE to the current row is the row's own (its last peer's
+# under RANGE); NTH_VALUE the partition's k-th, NULL before the frame has
+# it (and over the whole partition, the k-th on every row).
+LAST_ROW = "{x}"
+NTH = "{?[(til count x)>=y-1;x y-1;x 0N]}"
+NTH_WHOLE = "{x y-1}"
 # BOOL_AND and BOOL_OR over where the condition is true (x) and where it is
 # known (y): SQL skips the unknown rows. NULL over none is false in q, which
 # has no null boolean.
@@ -1337,18 +1343,28 @@ class QGenerator(Generator):
         return limited(self, node, text)
 
     def set_operation(self, node: exp.Expr, word: str) -> str:
-        from sqlglot_q.query import limited
+        from sqlglot_q.query import limited, order_terms, output_names, sort
 
-        if node.args.get("order"):
-            return self.refuse(f"ORDER BY after {node.key.upper()} has no q translation here")
+        def ordered(text: str) -> str:
+            # ORDER BY after it names the columns of its first query.
+            order = node.args.get("order")
+            if order:
+                first = node.this
+                while isinstance(first, (exp.SetOperation, exp.Subquery)):
+                    first = first.this
+                items = list(first.expressions)
+                terms, _ = order_terms(self, order, items, output_names(items), allow_source=False)
+                text = sort(terms, text, self)
+            return limited(self, node, text)
+
         if not node.args.get("distinct"):
             word = INTERSECT_ALL if word == "inter" else EXCEPT_ALL
             left, right = self.operand_query(node.this), self.operand_query(aligned(node))
-            return limited(self, node, f"{word}[{left};{right}]")
+            return ordered(f"{word}[{left};{right}]")
         # The rows of the first in (or not in) the second, each once, as
         # SQL's set operations; q's except and inter compare whole rows.
         left, right = self.operand_query(node.this), self.operand_query(aligned(node))
-        return limited(self, node, f"distinct {left} {word} {right}")
+        return ordered(f"distinct {left} {word} {right}")
 
     def intersect_sql(self, node: exp.Intersect) -> str:
         return self.set_operation(node, "inter")
@@ -1809,18 +1825,24 @@ def _select_rewrites():
     from sqlglot_q.rewrites import (
         correlated_scalars,
         expand_group_by_all,
+        grouping_sets,
         join_conditions,
+        named_windows,
         order_by_expression,
         q_names,
         quantified_in,
         regex_like,
         table_star,
+        window_over_group,
     )
 
     # sqlglot's own rewrites, as its dialects use them: QUALIFY and DISTINCT
     # ON become a window in a subquery, which the window stages translate.
     return transforms.preprocess(
         [
+            named_windows,
+            grouping_sets,
+            window_over_group,
             transforms.eliminate_qualify,
             transforms.eliminate_distinct_on,
             expand_group_by_all,
@@ -1850,8 +1872,16 @@ def scalar(self, node: exp.Expr) -> str:
     return scalars.write(self, node, call)
 
 
+def null_of(self, node) -> str:
+    # A grouping set's missing key: its column's null, typed as the column.
+    return f"first 0#{self.sql(node.this)}"
+
+
+from sqlglot_q.rewrites import NullOf  # noqa: E402
+
 QGenerator.TRANSFORMS = {
     QText: qtext,
+    NullOf: null_of,
     exp.Pi: lambda self, node: "3.141592653589793",
     # The local date and time: .z.d and .z.p are UTC's.
     exp.CurrentDate: lambda self, node: ".z.D",

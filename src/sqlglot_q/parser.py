@@ -40,6 +40,7 @@ from sqlglot_q.generator import (
     INT_DIV,
     INTERSECT_ALL,
     LAG_DEFAULT,
+    LAST_ROW,
     LEAD_DEFAULT,
     LEFT,
     LEFT_JOIN,
@@ -50,6 +51,8 @@ from sqlglot_q.generator import (
     MOVING_NULLS,
     NAME,
     NON_NULL,
+    NTH,
+    NTH_WHOLE,
     NTILE,
     NULLS,
     PARSE,
@@ -938,6 +941,15 @@ class Statement:
             self.expect("]")
             kind = exp.LogicalAnd if text == BOOL_AND else exp.LogicalOr
             return kind(this=cond)
+        if text == LAST_ROW:
+            return QCall(this=self.expr(stop), fn="lastrow")
+        if text in (NTH, NTH_WHOLE) and self.is_("["):
+            self.expect("[")
+            arg = self.expr(set())
+            self.expect(";")
+            n = self.expr(set())
+            self.expect("]")
+            return QCall(this=arg, fn="nth" if text == NTH else "nthwhole", n=n)
         if text in FRAMES.values():
             fn = next(k for k, v in FRAMES.items() if v == text)
             self.expect("[")
@@ -2116,7 +2128,9 @@ def null_order(parser, target, key: str, first: bool):
     from sqlglot_q.parser import Sorted
 
     node = target.this if isinstance(target, exp.Paren) else target
-    order = node.args.get("order") if isinstance(node, (exp.Select, exp.Union, Sorted)) else None
+    order = (
+        node.args.get("order") if isinstance(node, (exp.Select, exp.SetOperation, Sorted)) else None
+    )
     if order is None:
         parser.fail("a null sort is read only after a sort on its key")
     for term in order.expressions:

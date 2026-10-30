@@ -39,10 +39,46 @@ QUERIES = [
     "SELECT g, QUANTILE_DISC(x, 0.5) AS a, QUANTILE_DISC(n, 0.25) AS b FROM t GROUP BY g",
     "SELECT g, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS a FROM t GROUP BY g",
     "SELECT PERCENTILE_DISC(0.25) WITHIN GROUP (ORDER BY n) AS a FROM t",
+    # Windows: LAST_VALUE and NTH_VALUE to the current row, COUNT(DISTINCT).
+    "SELECT g, n, LAST_VALUE(n) OVER (PARTITION BY g ORDER BY o) AS r FROM t",
+    "SELECT g, n, LAST_VALUE(n) OVER (PARTITION BY g ORDER BY o, n "
+    "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS r FROM t",
+    "SELECT g, n, NTH_VALUE(n, 2) OVER (PARTITION BY g ORDER BY o, n) AS r FROM t",
+    "SELECT g, n, NTH_VALUE(n, 2) OVER (PARTITION BY g ORDER BY o) AS r FROM t",
+    "SELECT g, n, NTH_VALUE(s, 1) OVER (PARTITION BY g ORDER BY o, n "
+    "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS r FROM t",
+    "SELECT g, n, COUNT(DISTINCT o) OVER (PARTITION BY g) AS r FROM t",
+    # Named windows.
+    "SELECT g, n, ROW_NUMBER() OVER w AS r, SUM(n) OVER w AS s FROM t "
+    "WINDOW w AS (PARTITION BY g ORDER BY o, n)",
+    "SELECT g, n, SUM(n) OVER (w ROWS 1 PRECEDING) AS s FROM t "
+    "WINDOW w AS (PARTITION BY g ORDER BY o, n)",
+    # Windows over a grouped result.
+    "SELECT g, SUM(n) AS s, SUM(SUM(n)) OVER () AS total FROM t GROUP BY g",
+    "SELECT g, COUNT(*) AS c, RANK() OVER (ORDER BY COUNT(*) DESC) AS r FROM t GROUP BY g",
+    "SELECT g, SUM(n) AS s, SUM(n) * 100.0 / SUM(SUM(n)) OVER () AS pct FROM t GROUP BY g",
+    "SELECT g, o, MAX(n) AS m, ROW_NUMBER() OVER (PARTITION BY g ORDER BY MAX(n) DESC) AS r "
+    "FROM t GROUP BY g, o",
+    # ORDER BY after INTERSECT and EXCEPT.
+    "SELECT g FROM t INTERSECT SELECT g FROM u ORDER BY g DESC",
+    "SELECT g FROM t EXCEPT ALL SELECT g FROM u ORDER BY 1",
+    # Grouping sets, as a UNION ALL of groupings.
+    "SELECT g, COUNT(*) AS c FROM t GROUP BY ROLLUP (g)",
+    "SELECT g, o, SUM(n) AS s FROM t GROUP BY ROLLUP (g, o)",
+    "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g), (o))",
+    "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g, o), ())",
+    "SELECT g, o, MAX(x) AS m FROM t GROUP BY CUBE (g, o)",
 ]
 
 # Translated, but read back from q only as far as SQL can: one way.
-ONE_WAY = {"SELECT CONCAT_WS('-', g, s) AS a FROM t"}
+ONE_WAY = {
+    "SELECT CONCAT_WS('-', g, s) AS a FROM t",
+    "SELECT g, COUNT(*) AS c FROM t GROUP BY ROLLUP (g)",
+    "SELECT g, o, SUM(n) AS s FROM t GROUP BY ROLLUP (g, o)",
+    "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g), (o))",
+    "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g, o), ())",
+    "SELECT g, o, MAX(x) AS m FROM t GROUP BY CUBE (g, o)",
+}
 
 
 @pytest.fixture(scope="module")

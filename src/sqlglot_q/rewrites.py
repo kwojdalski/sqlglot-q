@@ -394,3 +394,155 @@ def table_star(expression: exp.Expr) -> exp.Expr:
         ],
     )
     return expression
+
+
+def named_windows(expression: exp.Expr) -> exp.Expr:
+    """WINDOW w AS (PARTITION BY g ORDER BY o) ... OVER w: each OVER w with
+    w's definition written in (and an OVER (w ORDER BY x) with w's partition
+    and its own order)."""
+    if not isinstance(expression, exp.Select) or not expression.args.get("windows"):
+        return expression
+    expression = expression.copy()
+    named = {w.name: w for w in expression.args["windows"]}
+
+    def inline(node: exp.Expr) -> exp.Expr:
+        # (transform works on a detached copy of each item: a window of a
+        # subquery has its select above it there.)
+        if not isinstance(node, exp.Window) or node.find_ancestor(exp.Select) is not None:
+            return node
+        alias = node.args.get("alias")
+        if alias is None or alias.name not in named:
+            return node
+        base = named[alias.name]
+        node = node.copy()
+        node.set("alias", None)
+        for key in ("partition_by", "order", "spec"):
+            if not node.args.get(key) and base.args.get(key):
+                value = base.args[key]
+                copied = [v.copy() for v in value] if isinstance(value, list) else value.copy()
+                node.set(key, copied)
+        return node
+
+    expression.set("expressions", [e.transform(inline) for e in expression.expressions])
+    expression.set("windows", None)
+    return expression
+
+
+def window_over_group(expression: exp.Expr) -> exp.Expr:
+    """Windows over a grouped result, SQL's order of evaluation made a
+    subquery: the grouping with each aggregate a column, the windows over it.
+
+        SELECT g, SUM(n) AS s, SUM(SUM(n)) OVER () AS w FROM t GROUP BY g
+        SELECT g, s, SUM(q_a1) OVER () AS w
+          FROM (SELECT g, SUM(n) AS s, SUM(n) AS q_a1 FROM t GROUP BY g)"""
+    if not isinstance(expression, exp.Select) or not expression.args.get("group"):
+        return expression
+    if not any(i.find(exp.Window) for i in expression.expressions):
+        return expression
+    group = expression.args["group"].expressions
+    if not all(isinstance(k, exp.Column) for k in group):
+        return expression
+    inner_items: list[exp.Expr] = [exp.column(k.name) for k in group]
+    hoisted: dict[str, str] = {}
+
+    def hoist(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, exp.AggFunc) and not isinstance(node.parent, exp.Window):
+            key = node.sql()
+            if key not in hoisted:
+                hoisted[key] = f"q_a{len(hoisted)}"
+                inner_items.append(exp.alias_(node.copy(), hoisted[key]))
+            return exp.column(hoisted[key])
+        if isinstance(node, exp.Column) and not node.table:
+            return node
+        return node
+
+    outer_items = []
+    for item in expression.expressions:
+        name = item.alias if isinstance(item, exp.Alias) else None
+        body = item.this if isinstance(item, exp.Alias) else item
+        new = body.copy().transform(hoist)
+        if isinstance(body, exp.Column) and body.name in {k.name for k in group}:
+            outer_items.append(exp.column(body.name))
+            continue
+        outer_items.append(exp.alias_(new, name) if name else new)
+    inner = exp.Select(expressions=inner_items)
+    for key in ("from_", "joins", "where", "group", "having"):
+        if expression.args.get(key):
+            inner.set(key, expression.args[key].copy())
+    outer = exp.Select(expressions=outer_items).from_(exp.Subquery(this=inner), copy=False)
+    for key in ("order", "limit", "offset"):
+        if expression.args.get(key):
+            outer.set(key, expression.args[key].copy().transform(hoist))
+    return outer
+
+
+class NullOf(exp.Expression):
+    """The null of a column's type: a key a grouping set leaves out."""
+
+    arg_types = {"this": True}
+
+
+def grouping_sets(expression: exp.Expr) -> exp.Expr:
+    """GROUP BY ROLLUP (a, b), CUBE (a, b) or GROUPING SETS (...): a UNION
+    ALL of one grouped select per set, the keys it leaves out NULL."""
+    if not isinstance(expression, exp.Select) or not expression.args.get("group"):
+        return expression
+    node = expression.args["group"]
+    # sqlglot before 30.x keeps ROLLUP, CUBE and GROUPING SETS apart from
+    # the plain keys.
+    group = list(node.expressions)
+    for key in ("rollup", "cube", "grouping_sets"):
+        group += list(node.args.get(key) or [])
+    if len(group) != 1 or not isinstance(group[0], (exp.Rollup, exp.Cube, exp.GroupingSets)):
+        return expression
+    spec = group[0]
+    keys = list(spec.expressions)
+    if isinstance(spec, exp.Rollup):
+        sets = [keys[:n] for n in range(len(keys), -1, -1)]
+    elif isinstance(spec, exp.Cube):
+        from itertools import combinations
+
+        sets = [list(c) for n in range(len(keys), -1, -1) for c in combinations(keys, n)]
+    else:
+        sets = []
+        for item in keys:
+            inner = item.this if isinstance(item, exp.Paren) else item
+            sets.append(list(inner.expressions) if isinstance(inner, exp.Tuple) else [inner])
+        keys = []
+        for s in sets:
+            keys += [k for k in s if k not in keys]
+    if not all(isinstance(k, exp.Column) for k in keys):
+        return expression
+    selects = []
+    for grouped in sets:
+        names = {k.name for k in grouped}
+        missing = {k.name for k in keys} - names
+
+        def blank(node: exp.Expr, missing: set[str] = missing) -> exp.Expr:
+            if (
+                isinstance(node, exp.Column)
+                and node.name in missing
+                and node.find_ancestor(exp.AggFunc) is None
+            ):
+                return NullOf(this=exp.column(node.name))
+            return node
+
+        select = expression.copy()
+        items = []
+        for item in select.expressions:
+            name = item.alias_or_name
+            body = item.this if isinstance(item, exp.Alias) else item
+            items.append(exp.alias_(body.transform(blank), name))
+        select.set("expressions", items)
+        select.set("order", None)
+        select.set("limit", None)
+        select.set("group", exp.Group(expressions=[k.copy() for k in grouped]) if grouped else None)
+        selects.append(select)
+    union = selects[0]
+    for select in selects[1:]:
+        union = exp.Union(this=union, expression=select, distinct=False)
+    node = union
+    for key in ("order", "limit", "offset"):
+        if expression.args.get(key):
+            node.set(key, expression.args[key].copy())
+    return node

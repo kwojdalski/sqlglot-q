@@ -355,7 +355,7 @@ class TestRefusals(Validator):
     def test_unsupported_constructs_raise_by_default(self):
         self.refuses("SELECT a FROM t FULL JOIN u ON t.k = u.j", "FULL JOIN")
         self.refuses("SELECT a FROM t JOIN u ON k = j", "told apart")
-        self.refuses("SELECT NTH_VALUE(a, 2) OVER (ORDER BY a) FROM t", "NthValue")
+        self.refuses("SELECT NTH_VALUE(a, b) OVER (ORDER BY a) FROM t", "literal position")
         self.refuses("SELECT count FROM t", "q keyword")
         self.refuses("SELECT a FROM db.t", "qualified table")
         self.refuses("SELECT DISTINCT a FROM t ORDER BY a + 1", "ORDER BY")

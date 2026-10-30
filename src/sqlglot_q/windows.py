@@ -153,12 +153,27 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
             raise Refused("FIRST_VALUE is translated from the partition's first row")
         return f"first {gen.operand(fn.this)}", False, has_order
     if isinstance(fn, exp.LastValue):
+        if frame in ("range", "rows"):
+            from sqlglot_q.generator import LAST_ROW
+
+            # To the current row: the row's own value, or its last peer's.
+            return f"{LAST_ROW} {gen.operand(fn.this)}", frame == "range", True
         if frame != "whole":
-            raise Refused(
-                "LAST_VALUE is translated over the whole partition (ROWS BETWEEN UNBOUNDED "
-                "PRECEDING AND UNBOUNDED FOLLOWING); with the default frame it is the row itself"
-            )
+            raise Refused("LAST_VALUE is translated over the whole partition or to the current row")
         return f"last {gen.operand(fn.this)}", False, has_order
+    if isinstance(fn, exp.NthValue):
+        from sqlglot_q.generator import NTH, NTH_WHOLE
+
+        offset = fn.args.get("offset")
+        if not (isinstance(offset, exp.Literal) and offset.name.isdigit() and int(offset.name)):
+            raise Refused("NTH_VALUE is translated with a literal position")
+        if fn.args.get("from_first") is False or fn.args.get("ignore_nulls"):
+            raise Refused("NTH_VALUE FROM LAST or IGNORE NULLS has no q form here")
+        if frame == "whole":
+            return f"{NTH_WHOLE}[{gen.sql(fn.this)};{offset.name}]", False, has_order
+        if frame in ("range", "rows"):
+            return f"{NTH}[{gen.sql(fn.this)};{offset.name}]", frame == "range", True
+        raise Refused("NTH_VALUE is translated over the whole partition or to the current row")
     if isinstance(fn, exp.Ntile):
         if not order:
             raise Refused("NTILE needs an ORDER BY")
@@ -196,7 +211,10 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
     if isinstance(fn, exp.Count):
         arg = fn.this
         if isinstance(arg, exp.Distinct):
-            raise Refused("COUNT(DISTINCT ...) OVER has no q form here")
+            if frame != "whole" or len(arg.expressions) != 1:
+                raise Refused("COUNT(DISTINCT ...) OVER is translated over the whole partition")
+            col = gen.operand(arg.expressions[0])
+            return f"count distinct {col} where not null {col}", False, False
         star = arg is None or isinstance(arg, exp.Star)
         col = None if star else gen.operand(arg)
         if frame == "whole":
