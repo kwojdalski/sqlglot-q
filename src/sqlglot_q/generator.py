@@ -220,6 +220,9 @@ TEXT_OF = (
     f"-12h=t;{TEXT_TS} x;12h=t;{TEXT_TS} each x;-9h=t;{TEXT_FLOAT} x;9h=t;{TEXT_FLOAT} each x;"
     "string x]}"
 )
+# A join's side without the columns the query reads from another side (and
+# that it may have too): q's joined table keeps the right side's.
+OTHERS = "{(cols[x] except (),y)#x}"
 # LEFT JOIN: ej's matches, and the left rows with none (uj gives them the
 # right's columns, null).
 LEFT_JOIN = "{k:(),x;ej[k;y;z] uj y where not (k#y) in k#z}"
@@ -1472,6 +1475,21 @@ class QGenerator(Generator):
             sets.append(f"{col}:{value}")
         sets = ",".join(sets)
         return f"update {sets} from `{self.table_sql(node.this)}{where}"
+
+    def values_sql(self, node: exp.Values) -> str:
+        # (VALUES (1, 'a'), (2, 'b')) AS v(k, s): the table ([] k:1 2;s:`a`b).
+        alias = node.args.get("alias")
+        names = [c.name for c in alias.columns] if alias is not None else []
+        rows = [r.expressions if isinstance(r, exp.Tuple) else [r] for r in node.expressions]
+        width = len(rows[0])
+        if len(names) != width or any(len(r) != width for r in rows):
+            return self.refuse("VALUES is translated as a table with its columns named")
+        cols = []
+        for i, name in enumerate(names):
+            values = [r[i] for r in rows]
+            text = self.vector(values) if len(values) > 1 else f"enlist {self.operand(values[0])}"
+            cols.append(f"{self.name(name)}:{text}")
+        return f"([] {';'.join(cols)})"
 
     def alter_sql(self, node: exp.Alter) -> str:
         if (node.args.get("kind") or "").upper() != "TABLE" or len(node.args["actions"]) != 1:

@@ -67,18 +67,59 @@ def source(gen: QGenerator, node: exp.Select) -> str:
         if refused is not None:
             return refused
     text = gen.operand_query(left) if isinstance(left, exp.Subquery) else gen.sql(left)
+    drops = others_names(node)
+    if node.args.get("joins"):
+        text = dropped(text, drops.get(left.alias_or_name, []))
     for join in node.args.get("joins") or []:
-        text = joined(gen, text, join)
+        text = joined(gen, text, join, drops.get(join.this.alias_or_name, []))
     return text
 
 
-def joined(gen: QGenerator, left: str, join: exp.Join) -> str:
+def others_names(node: exp.Select) -> dict[str, list[str]]:
+    """For each table of a join, the names the query reads from another one
+    of them (t.n): a joined q table has one column per name, the right
+    side's, so each table first leaves out what is another's. Join keys of
+    one name are the same on both sides, and stay."""
+    tables = [node.args["from_"].this.alias_or_name]
+    keys: set[str] = set()
+    for join in node.args.get("joins") or []:
+        tables.append(join.this.alias_or_name)
+        keys |= {u.name for u in join.args.get("using") or []}
+        on = join.args.get("on")
+        for c in conjuncts(on) if on is not None else []:
+            if isinstance(c, exp.EQ) and all(isinstance(x, exp.Column) for x in c.flatten()):
+                if c.this.name == c.expression.name:
+                    keys.add(c.this.name)
+    owned: dict[str, set[str]] = {}
+    for col in node.find_all(exp.Column):
+        if col.table in tables and col.find_ancestor(exp.Select) is node:
+            if col.find_ancestor(exp.Join) is None:
+                owned.setdefault(col.table, set()).add(col.name)
+    out = {}
+    for table in tables:
+        theirs = set().union(*(names for t, names in owned.items() if t != table))
+        drop = sorted(theirs - owned.get(table, set()) - keys)
+        if drop:
+            out[table] = drop
+    return out
+
+
+def dropped(text: str, names: list[str]) -> str:
+    if not names:
+        return text
+    from sqlglot_q.generator import OTHERS
+
+    return f"{OTHERS}[{wrap(text)};{''.join('`' + n for n in names)}]"
+
+
+def joined(gen: QGenerator, left: str, join: exp.Join, drop: list[str] | None = None) -> str:
     right_node = join.this
     right = (
         gen.operand_query(right_node)
         if isinstance(right_node, exp.Subquery)
         else gen.sql(right_node)
     )
+    right = dropped(right, drop or [])
     side = (join.args.get("side") or "").upper()
     kind = (join.args.get("kind") or "").upper()
     plain = not any(join.args.get(k) for k in ("on", "using", "method"))
@@ -291,7 +332,8 @@ def rename_outputs(gen: QGenerator, node: exp.Select) -> tuple[exp.Select, list[
 def symbols(gen: QGenerator, names: list[str]) -> str:
     if all(SYMBOL.match(n) for n in names):
         return "".join(f"`{n}" for n in names)
-    return "`$(" + ";".join(gen.chars(n) for n in names) + ")"
+    # Parenthesised: `$(...) xcol t would cast all of xcol's result ('nyi).
+    return "(`$(" + ";".join(gen.chars(n) for n in names) + "))"
 
 
 def query(gen: QGenerator, node: exp.Select) -> str:

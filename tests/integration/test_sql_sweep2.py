@@ -68,6 +68,22 @@ QUERIES = [
     "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g), (o))",
     "SELECT g, o, COUNT(*) AS c FROM t GROUP BY GROUPING SETS ((g, o), ())",
     "SELECT g, o, MAX(x) AS m FROM t GROUP BY CUBE (g, o)",
+    # VALUES as a table.
+    "SELECT k, s FROM (VALUES (1, 'a'), (2, 'b')) AS v(k, s) WHERE k > 1",
+    "SELECT t.g, n, k FROM t JOIN (VALUES ('a', 1), ('b', 2)) AS v(g, k) ON t.g = v.g",
+    "SELECT k FROM (VALUES (5)) AS v(k)",
+    # Quoted names: `$(...) xcol, parenthesised; a keyword as a name.
+    'SELECT g AS "Group", n AS "my col" FROM t',
+    'SELECT g, n AS "select" FROM t',
+    'SELECT g AS "a b", COUNT(*) AS "n rows" FROM t GROUP BY g',
+    # A joined q table keeps the right side's column of a shared name: each
+    # side first leaves out what the query reads from another.
+    "SELECT t.g, u.v FROM t CROSS JOIN u",
+    "SELECT t.g, u.v FROM t, u WHERE u.v > 15",
+    "SELECT t.n, u.v FROM t JOIN u ON t.g = u.g",
+    "SELECT t.o, v FROM t JOIN u USING (g)",
+    "SELECT u.g, t.n FROM u LEFT JOIN t ON u.g = t.g",
+    "SELECT a, w, u.g FROM t2 CROSS JOIN u",
 ]
 
 # Translated, but read back from q only as far as SQL can: one way.

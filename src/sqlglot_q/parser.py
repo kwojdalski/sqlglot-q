@@ -55,6 +55,7 @@ from sqlglot_q.generator import (
     NTH_WHOLE,
     NTILE,
     NULLS,
+    OTHERS,
     PARSE,
     PERCENT_RANK,
     QUARTER,
@@ -716,6 +717,13 @@ class Statement:
         arg = self.expr(stop)
         if type_name == "" and isinstance(arg, exp.Cast):
             return arg  # `$string x
+        if (
+            type_name == ""
+            and isinstance(bare(arg), Rows)
+            and all(isinstance(i, Chars) for i in bare(arg).args["items"])
+        ):
+            # `$("Group";"my col"): a symbol list, names xcol gives columns.
+            return Rows(items=[exp.Literal.string(i.this) for i in bare(arg).args["items"]])
         if type_name == "" and isinstance(bare(arg), (exp.Column, Chars)):
             # (`$w)>`$"b": text compared as symbols, in the text's order
             return literal(bare(arg))
@@ -941,6 +949,18 @@ class Statement:
             self.expect("]")
             kind = exp.LogicalAnd if text == BOOL_AND else exp.LogicalOr
             return kind(this=cond)
+        if text == OTHERS and self.is_("["):
+            # A join side without another side's columns: the side itself,
+            # as SQL tells them apart by table.
+            self.expect("[")
+            side = bare(self.expr(set())).copy()
+            self.expect(";")
+            names = self.expr(set())
+            self.expect("]")
+            items = names.args["items"] if isinstance(names, Rows) else [names]
+            # Remembered: the names another side has, which qualify columns.
+            side.meta["drops"] = [i.this for i in items]
+            return side
         if text == LAST_ROW:
             return QCall(this=self.expr(stop), fn="lastrow")
         if text in (NTH, NTH_WHOLE) and self.is_("["):
@@ -1776,10 +1796,26 @@ def table(parser: Statement, name: str) -> exp.Table:
 
 
 def as_table(parser: Statement, node: exp.Expr) -> exp.Expr:
+    if isinstance(node, exp.Paren) and isinstance(node.this, (exp.Column, TableLiteral)):
+        node = node.this
+    if isinstance(node, TableLiteral):
+        # ([] k:1 2;s:`a`b) as a source: (VALUES (1, 'a'), (2, 'b')) AS q_v(k, s).
+        cols = [
+            r.args["items"] if isinstance(r, Rows) else [r.this] if isinstance(r, Enlisted) else [r]
+            for r in node.args["values"]
+        ]
+        cols = [[literal(v) for v in c] for c in cols]
+        rows = [exp.Tuple(expressions=list(r)) for r in zip(*cols, strict=True)]
+        alias = exp.TableAlias(
+            this=exp.to_identifier("q_v"),
+            columns=[exp.to_identifier(c) for c in node.args["columns"]],
+        )
+        return exp.Values(expressions=rows, alias=alias)
     if isinstance(node, exp.Column):
-        return table(parser, node.name)
-    if isinstance(node, exp.Paren) and isinstance(node.this, exp.Column):
-        return table(parser, node.this.name)
+        found = table(parser, node.name)
+        if node.meta.get("drops"):
+            found.meta["drops"] = node.meta["drops"]
+        return found
     parser.fail("a from operand is read as a table name, a join or a query")
 
 
@@ -1807,6 +1843,8 @@ def select(parser, cols, keys, source, where, distinct) -> exp.Select:
         node.set("distinct", exp.Distinct())
     if order is not None:
         node.set("order", order)
+    if joins:
+        qualify_dropped(node)
     from sqlglot_q.windows_read import fold
 
     return fold(node)
@@ -1814,6 +1852,30 @@ def select(parser, cols, keys, source, where, distinct) -> exp.Select:
 
 def unalias(node: exp.Expr) -> exp.Expr:
     return node.this if isinstance(node, exp.Alias) else node
+
+
+def qualify_dropped(node: exp.Select) -> None:
+    """The generator's join sides left out the names another side's columns
+    have (OTHERS): a name only one side keeps is that side's, t.n."""
+    sides = [node.args["from_"].this, *(j.this for j in node.args["joins"])]
+
+    def drops(side) -> list[str]:
+        inner = side.this if isinstance(side, exp.Subquery) else side
+        return side.meta.get("drops") or inner.meta.get("drops") or []
+
+    names = {n for side in sides for n in drops(side)}
+    owner = {}
+    for name in names:
+        keeping = [s for s in sides if name not in drops(s)]
+        if len(keeping) == 1 and keeping[0].alias_or_name:
+            owner[name] = keeping[0].alias_or_name
+    if not owner:
+        return
+    for col in node.find_all(exp.Column):
+        if col.table or col.find_ancestor(exp.Join) is not None or col.name not in owner:
+            continue
+        if col.find_ancestor(exp.Select) is node:
+            col.set("table", exp.to_identifier(owner[col.name]))
 
 
 def first_last(item: exp.Expr) -> exp.Expr:
@@ -1914,6 +1976,8 @@ def limited(parser: Statement, count: exp.Expr, target: exp.Expr) -> exp.Expr:
 def renamed(parser: Statement, names: exp.Expr, target: exp.Expr) -> exp.Expr:
     if not isinstance(target, exp.Select):
         parser.fail("xcol is read on a select")
+    while isinstance(names, exp.Paren):
+        names = names.this
     new = (
         [names.this]
         if isinstance(names, exp.Literal)
@@ -1926,7 +1990,11 @@ def renamed(parser: Statement, names: exp.Expr, target: exp.Expr) -> exp.Expr:
         parser.fail("xcol names more columns than the select has")
     target.meta["xcol"] = (new, [i.copy() for i in items])  # an insert's columns
     for i, name in enumerate(new):
-        target.expressions[i] = exp.alias_(unalias(items[i]), name, quoted=True)
+        value = unalias(items[i])
+        if isinstance(value, exp.Column) and value.name == name:
+            target.expressions[i] = value  # its own name: the column as it is
+            continue
+        target.expressions[i] = exp.alias_(value, name, quoted=True)
     return target
 
 
@@ -2237,7 +2305,12 @@ def without_null_keys(node: exp.Expr, keys: list[str]) -> exp.Expr:
     if len(names) != len(parts) or names != sorted(keys):
         return node
     source = node.args["from_"].this
-    return source.this if isinstance(source, exp.Subquery) else exp.column(source.name)
+    if isinstance(source, exp.Subquery):
+        return source.this
+    column = exp.column(source.name)
+    if source.meta.get("drops"):
+        column.meta["drops"] = source.meta["drops"]
+    return column
 
 
 def nullable_side(node: exp.Expr) -> bool:
