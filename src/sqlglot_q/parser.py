@@ -33,6 +33,7 @@ from sqlglot_q.generator import (
     DOW,
     DOY,
     EXCEPT_ALL,
+    EXTRA_PARTS,
     FRAMES,
     FULL_JOIN,
     HALF_EVEN,
@@ -200,7 +201,7 @@ TOKEN = re.compile(
   | (?P<bool>[01]+b(?![A-Za-z0-9_]))
   | (?P<num>0[NnWw][a-z]?|\d+(?:\.\d*)?(?:e[+-]?\d+)?[a-z]?|\.\d+(?:e[+-]?\d+)?[a-z]?)
   | (?P<sym>(?:`[A-Za-z0-9_.:]*)+)
-  | (?P<name>\.z\.[DP](?![A-Za-z0-9_.])|[A-Za-z][A-Za-z0-9_.]*)
+  | (?P<name>\.z\.[DPT](?![A-Za-z0-9_.])|[A-Za-z][A-Za-z0-9_.]*)
   | (?P<op>~\\:|~'|,'|,\\:|,/:|=/:|<>|<=|>=|[=<>+\-*%&|^#~,!@$?_])
   | (?P<punct>[()\[\];:])
     """,
@@ -2476,8 +2477,9 @@ def nullable_side(node: exp.Expr) -> bool:
 
 
 PART_LAMBDAS = {DOW: "DOW", DOY: "DOY", QUARTER: "QUARTER", MILLISECOND: "MILLISECOND"}
+PART_LAMBDAS |= {text: part for part, text in EXTRA_PARTS.items() if part != "ISODOW"}
 # The local date and time, as SQL's CURRENT_DATE and CURRENT_TIMESTAMP.
-NOW = {".z.D": exp.CurrentDate, ".z.P": exp.CurrentTimestamp}
+NOW = {".z.D": exp.CurrentDate, ".z.P": exp.CurrentTimestamp, ".z.T": exp.CurrentTime}
 TRUNC_LAMBDAS = {text: unit for unit, text in TRUNC.items()}
 
 

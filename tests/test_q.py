@@ -261,6 +261,12 @@ class TestTemporal(Validator):
         # q counts buckets from 2000.01.01, DuckDB from 2000-01-03.
         self.refuses("SELECT TIME_BUCKET(INTERVAL '7 minutes', ts) FROM t", "divide a day")
 
+    def test_mysql_date_sub_and_current_time(self):
+        # MySQL's DATE_SUB(d, INTERVAL ...), which DuckDB has no form of.
+        q = sqlglot.transpile("SELECT DATE_SUB(d, INTERVAL 2 DAY) FROM t", read="mysql", write="q")
+        self.assertEqual(q[0], "select d-2D00:00:00.000000000 from t")
+        self.validate("SELECT CURRENT_TIME > tm FROM t", "select .z.T>tm from t")
+
     def test_asof_join_is_aj(self):
         q = "select from aj[`sym`time;t;`sym`time xasc q]"
         self.validate("SELECT * FROM t ASOF LEFT JOIN q USING (sym, time)", q)

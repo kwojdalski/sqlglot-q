@@ -85,6 +85,25 @@ QUERIES = [
     "SELECT a, CAST(x AS VARCHAR) AS z, CAST(ts AS VARCHAR) AS w FROM t",
     # AND of a boolean column as a value.
     "SELECT a, f AND a > 2 AS z, f OR x < 0 AS w FROM t",
+    # Dates: DATE_ADD, DATE_PART and the day-of parts.
+    "SELECT a, DATE_ADD(d, INTERVAL 3 DAY) AS b, DATE_ADD(ts, INTERVAL 2 HOUR) AS c FROM t",
+    "SELECT a, DATE_PART('year', d) AS y, DATE_PART('month', ts) AS m FROM t",
+    "SELECT a, DAYOFMONTH(d) AS dm, WEEKDAY(d) AS wd, ISODOW(d) AS iw FROM t",
+    "SELECT a, YEARWEEK(d) AS yw FROM t",
+    # DATE_DIFF in weeks (days apart, truncated), milliseconds and microseconds.
+    "SELECT a, DATE_DIFF('week', d, DATE '2024-06-01') AS w FROM t",
+    "SELECT a, DATE_DIFF('millisecond', ts, TIMESTAMP '2024-01-16 00:00:00') AS ms, "
+    "DATE_DIFF('microsecond', TIMESTAMP '2024-01-15 09:30:00', ts) AS us FROM t",
+    "SELECT a, MAKE_TIMESTAMP(2024, 1, a, 10, 30, 1.5) AS m FROM t",
+    "SELECT a, STRPTIME('2024-03-05', '%Y-%m-%d') AS z, "
+    "STRPTIME('2024-03-05 10:20:30', '%Y-%m-%d %H:%M:%S') AS w FROM t",
+    "SELECT a, ts + INTERVAL '1 day 2 hours' AS b FROM t",
+    "SELECT a, EXTRACT(isodow FROM d) AS z, EXTRACT(isoyear FROM d) AS y FROM t",
+    "SELECT a, EXTRACT(microsecond FROM ts) AS z FROM t",
+    "SELECT a, EXTRACT(decade FROM d) AS z, EXTRACT(century FROM d) AS c, "
+    "EXTRACT(millennium FROM d) AS m FROM t",
+    "SELECT a, DATE_TRUNC('decade', d) AS z, DATE_TRUNC('century', d) AS c FROM t",
+    "SELECT a, MONTHNAME(d) AS m FROM t",
 ]
 
 
@@ -103,7 +122,7 @@ def test_q_returns_what_duckdb_returns(answers, sql):
 
 
 REFUSED = [
-    "SELECT DATE_DIFF('week', d, DATE '2024-03-01') FROM t",
+    "SELECT DATE_DIFF('isoyear', d, DATE '2024-03-01') FROM t",
     "SELECT LAST_VALUE(n) OVER (ORDER BY a ROWS 1 PRECEDING) FROM t",
     "SELECT REPLACE(b, b, 'x') FROM t",
     "SELECT NTILE(2) OVER () FROM t",

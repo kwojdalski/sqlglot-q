@@ -118,7 +118,7 @@ REFUSED = [
     "SELECT d + INTERVAL '1.5' MONTH FROM t",
     "SELECT TIME_BUCKET(INTERVAL '7 minutes', ts) FROM t",
     "SELECT * FROM t ASOF JOIN q USING (sym, time)",
-    "SELECT DATE_TRUNC('decade', ts) FROM t",
+    "SELECT DATE_TRUNC('isoyear', ts) FROM t",
 ]
 
 

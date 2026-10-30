@@ -20,6 +20,30 @@ from sqlglot_q.generator import TEXT_KEY, TEXT_NULL
 
 # The first occurrence of y in x, from 1; 0 if none.
 FIND = "{n:count y;$[count w:where y~/:n sublist/:(til count x)_\\:x;1+first w;0]}"
+MONTHS = (
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+)
+
+
+def iso_format(fmt) -> str | None:
+    """Why STRPTIME's format has no q parse, or None: the ISO forms "P"$ reads."""
+    forms = ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
+    if isinstance(fmt, exp.Literal) and fmt.is_string and fmt.this in forms:
+        return None
+    return "STRPTIME is translated for %Y-%m-%d and %Y-%m-%d %H:%M:%S"
+
+
 DAYS = ("Saturday", "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday")
 # x plus y months, the day clamped to the month's last (Jan 31 + 1 is Feb 29),
 # the time of day kept; a timestamp, as SQL's date + interval is.
@@ -277,6 +301,50 @@ CALLS = [
     ),
     # APPROX_COUNT_DISTINCT, counted exactly.
     Call(exp.ApproxDistinct, "{count distinct x where not null x}", aggregate=True),
+    # Dates: ISO weekday, the month's name, a timestamp of its parts, and
+    # text parsed in the ISO forms q reads ("P"$).
+    Call(exp.DayOfWeekIso, "{1+(5+`int$`date$x) mod 7}"),
+    Call(
+        exp.Monthname,
+        "{`" + "`".join(MONTHS) + " -1+`mm$x}",
+        "{(" + ";".join(f'"{m}"' for m in MONTHS) + ") -1+`mm$x}",
+    ),
+    Call(
+        exp.TimestampFromParts,
+        "{[y;m;d;h;i;s](`timestamp$-1+d+`date$2000.01m+(12*y-2000)+m-1)"
+        "+`timespan$`long$1e9*s+(60*i)+3600*h}",
+        keys=("year", "month", "day", "hour", "min", "sec"),
+    ),
+    Call(
+        exp.StrToTime,
+        '{[x;f]"P"$string x}',
+        '{[x;f]"P"$x}',
+        keys=("this", "format"),
+        chars=("format",),
+        check=lambda node: iso_format(node.args["format"]),
+    ),
+    # DATE_DIFF in weeks: the days apart, truncated (not week boundaries);
+    # in milliseconds and microseconds, the boundaries crossed.
+    Call(
+        exp.DateDiff,
+        "{d:(`date$x)-`date$y;(signum d)*(abs d) div 7}",
+        keys=("this", "expression"),
+        fixed={"unit": "WEEK"},
+        ignored=("date_part_boundary",),
+    ),
+    *(
+        Call(
+            exp.DateDiff,
+            f"{{((`long$({span} xbar `timestamp$x)-{span} xbar `timestamp$y)) div {ns}}}",
+            keys=("this", "expression"),
+            fixed={"unit": unit},
+            ignored=("date_part_boundary",),
+        )
+        for unit, span, ns in (
+            ("MILLISECOND", "0D00:00:00.001", 1_000_000),
+            ("MICROSECOND", "0D00:00:00.000001", 1_000),
+        )
+    ),
     # Aggregates, each over the non-null values and NULL over none.
     Call(
         exp.ArgMax,

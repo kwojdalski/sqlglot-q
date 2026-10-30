@@ -83,6 +83,11 @@ ANONYMOUS = {
     "EVEN": ("{(signum x)*2*ceiling (abs x)%2}", False),
     "BIT_COUNT": ("{{$[null x;0N;`long$sum 0b vs x]} each x}", False),
     "PRODUCT": ("{$[count w:x where not null x;prd w;x 0N]}", True),
+    # ISO year * 100 + ISO week.
+    "YEARWEEK": (
+        "{t:3+`week$x;?[null x;0N;(100*`year$t)+1+(t-`date$`month$12*(`year$t)-2000) div 7]}",
+        False,
+    ),
 }
 
 # Spelled as lambdas because q has no word for them; parser.py reads these
@@ -149,6 +154,17 @@ DOW = "{(6+`int$`date$x) mod 7}"
 DOY = "{1+(`date$x)-`date$`month$12*(`year$x)-2000}"
 QUARTER = "{1+((`mm$x)-1) div 3}"
 MILLISECOND = "{((`ss$x)*1000)+((`long$x) mod 1000000000) div 1000000}"
+# More of EXTRACT: ISO weekday (Monday 1) and year (its Thursday's), the
+# microseconds with the seconds, decade, century and millennium (1-based).
+ISODOW = "{1+(5+`int$`date$x) mod 7}"
+EXTRA_PARTS = {
+    "ISODOW": ISODOW,
+    "ISOYEAR": "{`year$3+`week$x}",
+    "MICROSECOND": "{((`ss$x)*1000000)+((`long$x) mod 1000000000) div 1000}",
+    "DECADE": "{(`year$x) div 10}",
+    "CENTURY": "{1+((`year$x)-1) div 100}",
+    "MILLENNIUM": "{1+((`year$x)-1) div 1000}",
+}
 TRUNC = {
     "MONTH": "{`timestamp$`date$`month$x}",
     # 3 xbar 0Nm is 2000.01m: a null is kept out of the bucket.
@@ -156,6 +172,9 @@ TRUNC = {
     "YEAR": "{`timestamp$`date$`month$12*(`year$x)-2000}",
     "WEEK": "{`timestamp$`week$x}",  # the Monday, as SQL
     "DAY": "{`timestamp$`date$x}",  # 1D xbar of a date is not a day
+    "DECADE": "{`timestamp$`date$`month$12*(10*(`year$x) div 10)-2000}",
+    "CENTURY": "{`timestamp$`date$`month$12*(100*(`year$x) div 100)-2000}",
+    "MILLENNIUM": "{`timestamp$`date$`month$12*(1000*(`year$x) div 1000)-2000}",
 }
 # Text functions, each over the rows: symbols go through their strings.
 REPLACE = ("{`$ssr[;y;z] each string x}", "{ssr[;y;z] each x}")
@@ -364,6 +383,7 @@ def atomic(node: exp.Expr) -> bool:
             exp.Pi,
             exp.CurrentDate,
             exp.CurrentTimestamp,
+            exp.CurrentTime,
         ),
     )
 
@@ -992,6 +1012,16 @@ class QGenerator(Generator):
             return self.refuse("LIST is translated as the aggregate of one value")
         return self.arrayagg_sql(exp.ArrayAgg(this=node.expressions[0].copy()))
 
+    def dateadd_sql(self, node: exp.DateAdd) -> str:
+        # DATE_ADD(d, INTERVAL 3 DAY): d + INTERVAL 3 DAY.
+        span = node.expression
+        if not isinstance(span, exp.Interval):
+            span = exp.Interval(this=span.copy(), unit=exp.var(node.text("unit") or "DAY"))
+        kind = exp.Sub if isinstance(node, exp.DateSub) else exp.Add
+        return self.sql(kind(this=node.this.copy(), expression=span.copy()))
+
+    datesub_sql = dateadd_sql
+
     def first_sql(self, node: exp.First) -> str:
         # FIRST and LAST (DuckDB's): the first and last row's value, in the
         # table's order, nulls and all: q's first and last.
@@ -1194,11 +1224,13 @@ class QGenerator(Generator):
         part = node.name.upper()
         lambdas = {"DOW": DOW, "DAYOFWEEK": DOW, "DOY": DOY, "DAYOFYEAR": DOY}
         lambdas |= {"QUARTER": QUARTER, "MILLISECOND": MILLISECOND, "MILLISECONDS": MILLISECOND}
+        lambdas |= {k: v for k, v in EXTRA_PARTS.items() if k != "ISODOW"}
+        lambdas |= {"MICROSECONDS": EXTRA_PARTS["MICROSECOND"]}
         if part in lambdas:
             return f"{lambdas[part]} {self.operand(node.expression)}"
-        if part in ("EPOCH", "WEEK"):
-            # As EPOCH(x) and WEEK(x), the lambdas of scalars.py.
-            kind = exp.TimeToUnix if part == "EPOCH" else exp.Week
+        if part in ("EPOCH", "WEEK", "ISODOW"):
+            # As EPOCH(x), WEEK(x) and ISODOW(x), the lambdas of scalars.py.
+            kind = {"EPOCH": exp.TimeToUnix, "WEEK": exp.Week, "ISODOW": exp.DayOfWeekIso}[part]
             return self.sql(kind(this=node.expression.copy()))
         if part not in PARTS:
             return self.refuse(f"EXTRACT({part}) has no q cast")
@@ -1214,10 +1246,12 @@ class QGenerator(Generator):
             exp.Hour: "HOUR",
             exp.Minute: "MINUTE",
             exp.Second: "SECOND",
+            exp.DayOfMonth: "DAY",
         }[type(node)]
         return f"`{PARTS[part]}${self.operand(node.this)}"
 
     year_sql = month_sql = day_sql = hour_sql = minute_sql = second_sql = date_part
+    dayofmonth_sql = date_part
 
     def datebin_sql(self, node: exp.DateBin) -> str:
         from sqlglot_q.temporal import DAY, nanoseconds
@@ -1316,6 +1350,15 @@ class QGenerator(Generator):
         return f"?[{self.condition(node.this)};{self.sql(node.args['true'])};{self.sql(otherwise)}]"
 
     def anonymous_sql(self, node: exp.Anonymous) -> str:
+        name, args = node.name.upper(), node.expressions
+        if name == "DATE_SUB" and len(args) == 2 and isinstance(args[1], exp.Interval):
+            return self.sql(exp.Sub(this=args[0].copy(), expression=args[1].copy()))
+        if name == "DATE_PART" and len(args) == 2 and isinstance(args[0], exp.Literal):
+            return self.sql(
+                exp.Extract(this=exp.var(args[0].name.upper()), expression=args[1].copy())
+            )
+        if name == "WEEKDAY" and len(args) == 1:
+            return f"{DOW} {self.operand(args[0])}"  # Sunday 0, as DAYOFWEEK
         if node.name.upper() in ANONYMOUS and node.name.upper() not in self.FUNCTIONS:
             fn, aggregate = ANONYMOUS[node.name.upper()]
             text = f"{fn}[{';'.join(self.sql(a) for a in node.expressions)}]"
@@ -1941,6 +1984,7 @@ QGenerator.TRANSFORMS = {
     # The local date and time: .z.d and .z.p are UTC's.
     exp.CurrentDate: lambda self, node: ".z.D",
     exp.CurrentTimestamp: lambda self, node: ".z.P",
+    exp.CurrentTime: lambda self, node: ".z.T",
     # The functions in scalars.py, each a q lambda.
     **{call.kind: scalar for call in _scalar_calls() if call.kind not in (exp.DateDiff, exp.Trim)},
     exp.Select: _select_rewrites(),

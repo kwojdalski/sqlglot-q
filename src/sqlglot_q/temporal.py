@@ -65,6 +65,18 @@ def time_literal(text: str) -> str | None:
 
 
 def nanoseconds(node: exp.Interval) -> int | None:
+    if not node.text("unit") and isinstance(node.this, exp.Literal):
+        # INTERVAL '1 day 2 hours': the sum of its parts, each fixed.
+        parts = re.findall(r"(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)", node.this.name)
+        if not parts or re.sub(r"(-?\d+(?:\.\d+)?)\s*([A-Za-z]+)", "", node.this.name).strip():
+            return None
+        total = 0
+        for count, unit in parts:
+            part = nanoseconds(exp.Interval(this=exp.Literal.string(count), unit=exp.var(unit)))
+            if part is None:
+                return None
+            total += part
+        return total
     unit = node.text("unit").upper()
     unit = unit[:-1] if unit.endswith("S") else unit
     if unit not in UNITS:
