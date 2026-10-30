@@ -19,6 +19,21 @@ QUERIES = [
     "SELECT * FROM t WHERE (g, n) = ('a', 3)",
     "SELECT * FROM t WHERE (g, n) <> ('a', 3)",
     "SELECT * FROM t WHERE (g, n) IN (('a', 3), ('b', 5))",
+    # x // y of a float is DuckDB's plain division, of integers toward zero.
+    "SELECT x // 1 AS a, x // 2 AS b, n // -2 AS c, 7 // 2 AS d FROM t",
+    # Functions.
+    "SELECT ISFINITE(x) AS a FROM t WHERE x IS NOT NULL",
+    "SELECT ROUND_EVEN(x, 0) AS a, ROUND_EVEN(x, 1) AS b FROM t",
+    "SELECT SIGNBIT(x) AS a FROM t WHERE x IS NOT NULL",
+    "SELECT WEEKOFYEAR(d) AS a FROM t",
+    "SELECT EPOCH_US(CAST(d AS TIMESTAMP)) AS a, EPOCH_NS(CAST(d AS TIMESTAMP)) AS b FROM t",
+    "SELECT MAKE_TIME(10, o, 1.5) AS a FROM t",
+    "SELECT PREFIX(s, 'a') AS a, SUFFIX(s, 'z') AS b FROM t",
+    "SELECT UNICODE(s) AS a FROM t",
+    "SELECT LEVENSHTEIN(s, 'abc') AS a FROM t",
+    "SELECT BIT_LENGTH(s) AS a FROM t",
+    "SELECT STRING_SPLIT(s, '_') AS a FROM t",
+    "SELECT TRUNC(x, 1) AS a, TRUNC(n, -1) AS b FROM t",
 ]
 
 # On the calendar table, which has a boolean column f.
@@ -31,6 +46,9 @@ CALENDAR_QUERIES = [
 ]
 
 ONE_WAY: set[str] = set()
+if tuple(int(p) for p in sqlglot.__version__.split(".")[:2]) < (30, 1):
+    # sqlglot 30.0 writes DuckDB's TRUNC without its places ("not supported").
+    ONE_WAY.add("SELECT TRUNC(x, 1) AS a, TRUNC(n, -1) AS b FROM t")
 
 
 @pytest.fixture(scope="module")

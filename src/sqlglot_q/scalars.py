@@ -20,6 +20,12 @@ from sqlglot_q.generator import TEXT_KEY, TEXT_NULL
 
 # The first occurrence of y in x, from 1; 0 if none.
 FIND = "{n:count y;$[count w:where y~/:n sublist/:(til count x)_\\:x;1+first w;0]}"
+# The edit distance of x to y, row by row.
+LEV = (
+    "{m:count x;n:count y;d:til n+1;i:0;"
+    "while[i<m;e:d;d:(i+1),n#0;j:0;"
+    "while[j<n;d[j+1]:min(e[j+1]+1;d[j]+1;e[j]+not x[i]=y[j]);j+:1];i+:1];last d}"
+)
 MONTHS = (
     "January",
     "February",
@@ -345,6 +351,41 @@ CALLS = [
             ("MICROSECOND", "0D00:00:00.000001", 1_000),
         )
     ),
+    # More functions: the ISO week (as WEEK), a time of its parts, the first
+    # character's code (-1 for ''), the edit distance to a literal, the bits
+    # of text, text split into a list, TRUNC to a number of places.
+    Call(
+        exp.WeekOfYear,
+        "{t:3+`week$x;?[null x;0Ni;1+(t-`date$`month$12*(`year$t)-2000) div 7]}",
+    ),
+    Call(
+        exp.TimeFromParts, "{[h;m;s]`time$`long$1000*s+(60*m)+3600*h}", keys=("hour", "min", "sec")
+    ),
+    Call(
+        exp.Unicode,
+        "{?[null x;0N;{$[count x;`long$first x;-1]} each string x]}",
+        "{{$[count x;`long$first x;0N]} each x}",
+    ),
+    Call(
+        exp.Levenshtein,
+        "{" + LEV + "[;y] each string x}",
+        "{" + LEV + "[;y] each x}",
+        keys=("this", "expression"),
+        chars=("expression",),
+    ),
+    Call(
+        exp.BitLength,
+        "{?[null x;0N;8*count each string x]}",
+        "{{$[count x;8*count x;0N]} each x}",
+    ),
+    Call(
+        exp.Split,
+        "{{`$y vs x}[;y] each string x}",
+        "{{y vs x}[;y] each x}",
+        keys=("this", "expression"),
+        chars=("expression",),
+    ),
+    Call(exp.Trunc, "{(signum x)*(floor abs[x]*10 xexp y)%10 xexp y}", keys=("this", "decimals")),
     # Aggregates, each over the non-null values and NULL over none.
     Call(
         exp.ArgMax,

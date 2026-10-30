@@ -194,7 +194,6 @@ REFUSED = [
     "SELECT g FROM t WHERE s SIMILAR TO 'a.*'",
     "SELECT g FROM t WHERE REGEXP_MATCHES(s, 'a+b')",
     "SELECT STRFTIME(d, '%A') AS w FROM t",
-    "SELECT TRUNC(x, 1) FROM t",
     "SELECT LPAD(s, 5) FROM t",
 ]
 

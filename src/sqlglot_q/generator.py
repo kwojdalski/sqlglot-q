@@ -81,6 +81,11 @@ ANONYMOUS = {
         False,
     ),
     "EVEN": ("{(signum x)*2*ceiling (abs x)%2}", False),
+    "ISFINITE": ("{not x in -0w 0w}", False),
+    "ROUND_EVEN": ("{v:x*10 xexp y;f:floor v+0.5;(f-(v=f-0.5)&1=f mod 2)%10 xexp y}", False),
+    "SIGNBIT": ("{x<0}", False),
+    "EPOCH_US": ("{n:(`long$`timestamp$x)-`long$1970.01.01D0;n div 1000}", False),
+    "EPOCH_NS": ("{(`long$`timestamp$x)-`long$1970.01.01D0}", False),
     "BIT_COUNT": ("{{$[null x;0N;`long$sum 0b vs x]} each x}", False),
     "PRODUCT": ("{$[count w:x where not null x;prd w;x 0N]}", True),
     # ISO year * 100 + ISO week.
@@ -94,7 +99,9 @@ ANONYMOUS = {
 # exact texts back.
 ROUND = "{signum[x]*floor 0.5+abs x}"  # half away from zero, as SQL
 ROUND_TO = "{(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y}"
-INT_DIV = "{signum[x*y]*div[abs x;abs y]}"  # toward zero; q's div floors
+# x // y: toward zero for integers (q's div floors), and DuckDB's // of a
+# float is its plain division.
+INT_DIV = "{$[any 8 9h in abs type each (x;y);x%y;signum[x*y]*div[abs x;abs y]]}"
 MOD = "{x-y*signum[x%y]*floor abs x%y}"
 STRING_AGG = (
     "{{$[all null x;`;`$({sep}) sv string x where not null x]}}"  # SQL's %: the dividend's sign
@@ -1477,6 +1484,9 @@ class QGenerator(Generator):
             return self.sql(
                 exp.Extract(this=exp.var(args[0].name.upper()), expression=args[1].copy())
             )
+        if name in ("PREFIX", "SUFFIX") and len(args) == 2:
+            kind = exp.StartsWith if name == "PREFIX" else exp.EndsWith
+            return self.sql(kind(this=args[0].copy(), expression=args[1].copy()))
         if name == "WEEKDAY" and len(args) == 1:
             return f"{DOW} {self.operand(args[0])}"  # Sunday 0, as DAYOFWEEK
         if node.name.upper() in ANONYMOUS and node.name.upper() not in self.FUNCTIONS:
