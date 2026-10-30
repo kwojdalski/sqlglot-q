@@ -1654,19 +1654,28 @@ class Statement:
             return self.update(stop)
         if word == "delete":
             return self.delete(stop)
-        limit = offset = None
+        limit = offset = sort = None
         if word == "select" and self.is_("["):
-            # select[n]: the first n rows, SQL's LIMIT n.
+            # select[n]: the first n rows, SQL's LIMIT n; select[n;>c] sorts
+            # the result on c first, select[>c] only sorts.
             self.next()
-            limit = self.expr(set())
+            if not (self.is_(">") or self.is_("<")):
+                limit = self.expr(set())
+                if self.is_(";"):
+                    self.next()
+            if self.is_(">") or self.is_("<"):
+                desc = self.next().text == ">"
+                sort = (self.expr(set()), desc)
             self.expect("]")
             offset = None
-            if isinstance(limit, Rows) and len(limit.args["items"]) == 2:
+            if limit is None:
+                pass
+            elif isinstance(limit, Rows) and len(limit.args["items"]) == 2:
                 # select[m n]: n rows from the m-th, LIMIT n OFFSET m.
                 offset, limit = limit.args["items"]
                 if not (isinstance(offset, exp.Literal) and offset.this.isdigit()):
                     self.fail("select[m n] is read with counts m, n >= 0")
-            if not (isinstance(limit, exp.Literal) and limit.this.isdigit()):
+            if limit is not None and not (isinstance(limit, exp.Literal) and limit.this.isdigit()):
                 self.fail("select[n] is read with a count n >= 0; select[-n] takes the last rows")
         distinct = False
         if word == "select" and self.is_("distinct"):
@@ -1718,6 +1727,14 @@ class Statement:
         node = select(self, cols, keys, source, where, distinct)
         if qualify is not None:
             node.set("qualify", exp.Qualify(this=qualify))
+        if sort is not None:
+            column, desc = sort
+            if not (isinstance(column, exp.Column) and not column.table):
+                self.fail("select[n;>c] is read with one column c")
+            names = {c.alias_or_name for c in node.expressions}
+            if not (column.name in names or node.find(exp.Star) and not keys):
+                self.fail(f"select[n;>c] sorts the result, which has no {column.name}")
+            node = ordered(self, exp.Literal.string(column.name), node, desc=desc)
         if limit is not None and offset is not None:
             node = with_modifier(node, limit=limit, offset=offset)
         elif limit is not None:

@@ -228,7 +228,9 @@ becomes `0!select ... by`); the second must not.
   row order and are refused; `count distinct x` counts a null as a value in q
   and is refused; `fby` is not read.
 - `MODE`, `ARG_MAX` and `ARG_MIN` break ties by the first row in q; DuckDB's
-  choice among ties is its own.
+  choice among ties is its own. So does a limit after a sort: q's sorts are
+  stable, so `select[2;>c]` and ``2 sublist `c xdesc`` keep the first rows
+  among those tied on `c`, where `ORDER BY c DESC LIMIT 2` may take others.
 - `> ALL`/`< ANY` under a `NOT` or outside a `WHERE`/`HAVING` are refused,
   where their false and unknown differ from the `MIN`/`MAX` comparison's;
   so is `ORDER BY` an expression with `DISTINCT` or a join.

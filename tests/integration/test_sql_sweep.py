@@ -124,6 +124,12 @@ READ_RUN = [
     "select lo:first n, hi:last n by g from t where o>1",
     "(select g from t) union select g from u",
     "select r:sum[n]%count i by g from t",
+    # select[n;>c]: the result sorted on c, then its first n rows.
+    "select[2;>n] from t",
+    "select[2;<n] from t",
+    "select[>n] from t",
+    "select[3;>s] g, s from t",
+    "select[2;>c] c:count i by g from t",
 ]
 
 
@@ -138,6 +144,8 @@ def test_q_read_back_runs_the_same(q):
 REFUSED_READ = [
     # i is q's row index: SQL's rows have no order to number.
     "select from t where i<3",
+    # The sort is on the result, which has no n: q's 'n.
+    "select[2;>n] g from t",
 ]
 
 
