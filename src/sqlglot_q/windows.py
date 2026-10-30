@@ -137,7 +137,7 @@ def stage(gen: QGenerator, plan, value: str, tie_fix: bool, name: str, source: s
     if tie_fix:
         peers = ",".join([*parts, *[t[0] for t in terms]])
         last = f"last {name}"
-        if not gen.symbols and value.startswith(("{x} ", "{{$[x;y;z]}")):
+        if not gen.symbols:
             from sqlglot_q.generator import TEXT_SPREAD
 
             last = f"{TEXT_SPREAD}[i;{last}]"  # a string, over the peers' rows

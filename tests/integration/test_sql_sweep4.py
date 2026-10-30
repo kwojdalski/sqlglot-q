@@ -16,6 +16,9 @@ QUERIES = [
     "SELECT g, UPPER(g) AS u, COUNT(*) AS c FROM t GROUP BY g",
     "SELECT g, o, o * 2 AS d, SUM(n) AS s FROM t GROUP BY g, o",
     "SELECT g, LENGTH(g) + COUNT(*) AS z FROM t GROUP BY g",
+    # CONCAT_WS reads back.
+    "SELECT g, CONCAT_WS('/', g, s) AS x FROM t",
+    "SELECT g, CONCAT_WS('ab', s) AS x FROM t",
 ]
 
 # On trades and quotes.

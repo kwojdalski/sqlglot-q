@@ -104,6 +104,13 @@ QUERIES = [
     "SELECT w, ANY_VALUE(v) AS a FROM s WHERE w IS NOT NULL GROUP BY w HAVING COUNT(*) = 1",
     # A scalar subquery's text: one value, over the rows.
     "SELECT a, (SELECT MAX(w) FROM s) AS m FROM s",
+    # Running MIN and MAX of text: the peers' last is one string, spread.
+    "SELECT a, MAX(w) OVER (ORDER BY a) AS x FROM s",
+    "SELECT a, MIN(w) OVER (ORDER BY v) AS x, SUM(a) OVER (ORDER BY v) AS y FROM s",
+    # CONCAT_WS reads back.
+    "SELECT a, CONCAT_WS('/', w, v) AS x FROM s",
+    "SELECT a, CONCAT_WS(', \"', w, v, w) AS x FROM s",
+    "SELECT a, CONCAT_WS('-', w) AS x FROM s",
 ]
 
 

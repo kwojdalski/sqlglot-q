@@ -833,6 +833,27 @@ class Statement:
             if node is None:
                 self.fail("a lambda with the wrong arguments")
             return node
+        joined = re.fullmatch(
+            r"\{(?:`\$)?\((.*)\) sv (?:string x where not null x|x where 0<count each x)\}", text
+        )
+        if joined is not None and self.is_("each"):
+            # The generator's CONCAT_WS, of the parts' non-null text.
+            toks = [t for t in tokenize(joined.group(1)) if t.text != "enlist"]
+            if not (len(toks) == 1 and toks[0].kind == "str"):
+                self.fail("a lambda has no SQL form")
+            self.next()
+            if self.is_("flip"):
+                self.next()
+                rows = self.expr(stop)
+                if not isinstance(rows, Rows):
+                    self.fail("CONCAT_WS is read over a list of columns")
+                parts = [literal(p) for p in rows.args["items"]]
+            else:
+                self.expect("enlist")
+                self.expect("each")
+                parts = [literal(self.expr(stop))]
+            sep = exp.Literal.string(str(toks[0].value))
+            return exp.ConcatWs(expressions=[sep, *parts], safe=True, coalesce=True)
         if text == BUCKET_FROM and self.is_("["):
             self.expect("[")
             width = self.expr(set())
