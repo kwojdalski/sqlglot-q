@@ -36,6 +36,8 @@ from sqlglot_q.generator import (
     DOY,
     EXCEPT_ALL,
     EXTRA_PARTS,
+    FIRST_KNOWN,
+    FIRST_KNOWN_RUN,
     FRAMES,
     FULL_JOIN,
     HALF_EVEN,
@@ -43,6 +45,8 @@ from sqlglot_q.generator import (
     INT_DIV,
     INTERSECT_ALL,
     LAG_DEFAULT,
+    LAST_KNOWN,
+    LAST_KNOWN_RUN,
     LAST_ROW,
     LEAD_DEFAULT,
     LEFT,
@@ -1111,6 +1115,14 @@ class Statement:
             return side
         if text == LAST_ROW:
             return QCall(this=self.expr(stop), fn="lastrow")
+        known = {
+            FIRST_KNOWN: "firstknown",
+            LAST_KNOWN: "lastknown",
+            FIRST_KNOWN_RUN: "firstknownrun",
+            LAST_KNOWN_RUN: "lastknownrun",
+        }
+        if text in known:
+            return QCall(this=self.expr(stop), fn=known[text])
         if text in (NTH, NTH_WHOLE) and self.is_("["):
             self.expect("[")
             arg = self.expr(set())

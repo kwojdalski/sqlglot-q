@@ -111,6 +111,9 @@ QUERIES = [
     "SELECT a, CONCAT_WS('/', w, v) AS x FROM s",
     "SELECT a, CONCAT_WS(', \"', w, v, w) AS x FROM s",
     "SELECT a, CONCAT_WS('-', w) AS x FROM s",
+    # IGNORE NULLS of text: "" is the null.
+    "SELECT a, w, LAST_VALUE(w IGNORE NULLS) OVER (ORDER BY a) AS x FROM s",
+    "SELECT a, w, FIRST_VALUE(w IGNORE NULLS) OVER (ORDER BY a DESC) AS x FROM s",
 ]
 
 

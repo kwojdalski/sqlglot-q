@@ -120,6 +120,10 @@ def plan(gen: QGenerator, win: exp.Window):
     frame = frame_of(win.args.get("spec"), bool(terms))
     if isinstance(frame, tuple) and frame[0] == "range_time" and any(t[1] for t in terms):
         raise Refused("a RANGE frame of time is translated over an ascending ORDER BY")
+    if isinstance(frame, tuple) and frame[0] == "range_time":
+        # Its search wants the key sorted, nulls first as q sorts them; where
+        # they go changes no frame, a null key's being its null peers.
+        terms = [(c, desc, None) for c, desc, _ in terms]
     return tuple(parts), tuple(terms) if needs_order else (), value, tie_fix, frame
 
 
@@ -155,6 +159,24 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
 
     if isinstance(fn, exp.RowNumber):
         return "1+til count i", False, has_order
+    if isinstance(fn, exp.IgnoreNulls) and isinstance(
+        fn.this, (exp.FirstValue, exp.LastValue, exp.First, exp.Last)
+    ):
+        from sqlglot_q.generator import (
+            FIRST_KNOWN,
+            FIRST_KNOWN_RUN,
+            LAST_KNOWN,
+            LAST_KNOWN_RUN,
+        )
+
+        first = isinstance(fn.this, (exp.FirstValue, exp.First))
+        arg = gen.operand(fn.this.this)
+        if frame == "whole":
+            return f"{FIRST_KNOWN if first else LAST_KNOWN} {arg}", False, has_order
+        if frame in ("range", "rows"):
+            word = FIRST_KNOWN_RUN if first else LAST_KNOWN_RUN
+            return f"{word} {arg}", frame == "range", True
+        raise Refused("IGNORE NULLS is translated over the partition or to the current row")
     if isinstance(fn, (exp.First, exp.Last)) and not fn.args.get("expression"):
         # DuckDB's FIRST(x) OVER (...) is FIRST_VALUE, LAST(x) LAST_VALUE.
         kind = exp.FirstValue if isinstance(fn, exp.First) else exp.LastValue
@@ -327,6 +349,17 @@ def frame_of(spec: exp.WindowSpec | None, has_order: bool):
         if span is None:
             raise Refused("a RANGE frame of time is translated for a fixed interval")
         return ("range_time", span)
+    if (
+        kind == "RANGE"
+        and isinstance(start, exp.Literal)
+        and not start.is_string
+        and start_side == "PRECEDING"
+        and end == "CURRENT ROW"
+    ):
+        # RANGE BETWEEN n PRECEDING AND CURRENT ROW of a number: the same
+        # search, from n below the row's key. (A null key's frame is its null
+        # peers: nulls sort first, binr of one is 0 and bin its last.)
+        return ("range_time", start.name)
     if end != "CURRENT ROW":
         if kind != "ROWS":
             raise Refused("a RANGE frame is translated when it ends at the current row")

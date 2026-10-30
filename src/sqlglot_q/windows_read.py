@@ -224,6 +224,20 @@ def function(parser, value, order, non_null, QCall):
         return exp.PercentRank(), None, True
     if isinstance(value, QCall) and value.args["fn"] == "cume_dist":
         return exp.CumeDist(), exp.WindowSpec(**ROWS), True
+    if isinstance(value, QCall) and value.args["fn"].endswith(("knownrun", "known")):
+        # FIRST_VALUE / LAST_VALUE IGNORE NULLS, of the partition or running.
+        kind = exp.FirstValue if value.args["fn"].startswith("first") else exp.LastValue
+        fn = exp.IgnoreNulls(this=kind(this=value.this))
+        if value.args["fn"].endswith("run"):
+            return fn, exp.WindowSpec(**ROWS), True
+        whole = exp.WindowSpec(
+            kind="ROWS",
+            start="UNBOUNDED",
+            start_side="PRECEDING",
+            end="UNBOUNDED",
+            end_side="FOLLOWING",
+        )
+        return fn, whole, order is not None
     if isinstance(value, QCall) and value.args["fn"] == "lastrow":
         # The row's own value: ROWS to the current row (RANGE once its
         # peers share their last, which the tie stage says).

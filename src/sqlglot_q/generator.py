@@ -317,6 +317,12 @@ LIKE_EACH = '{x like\' {raze {$[x="%";"*";x="_";"?";x in "*?[]";"[",x,"]";x]} ea
 # under RANGE); NTH_VALUE the partition's k-th, NULL before the frame has
 # it (and over the whole partition, the k-th on every row).
 LAST_ROW = "{x}"
+# FIRST_VALUE and LAST_VALUE IGNORE NULLS: the first (last) value that is
+# not null, of the partition or up to the row; a null row before there is one.
+FIRST_KNOWN = f"{{$[count w:x where not {TEXT_NULL} x;first w;x 0N]}}"
+LAST_KNOWN = f"{{$[count w:x where not {TEXT_NULL} x;last w;x 0N]}}"
+FIRST_KNOWN_RUN = f"{{(enlist[x 0N],x) (1+k)*(k:(not {TEXT_NULL} x)?1b)<=til count x}}"
+LAST_KNOWN_RUN = f"{{(enlist[x 0N],x) maxs (1+til count x)*not {TEXT_NULL} x}}"
 NTH = "{{$[x;y;z]}[;x y-1;x count x] each (til count x)>=y-1}"
 NTH_WHOLE = "{x y-1}"
 # An aggregate's values in an order (STRING_AGG(s, ',' ORDER BY o)): x by
