@@ -46,6 +46,8 @@ CALENDAR_QUERIES = [
     # OR of a boolean column, q's or: f|x reads back as GREATEST.
     "SELECT a FROM t WHERE f OR n > 5",
     "SELECT a FROM t WHERE f AND x > 0",
+    # TRY_CAST of text to a date: q's parse of it.
+    "SELECT TRY_CAST(b AS DATE) AS d, TRY_CAST(CAST(d AS VARCHAR) AS DATE) AS e FROM t",
 ]
 
 ONE_WAY: set[str] = set()
@@ -70,3 +72,29 @@ def test_q_returns_what_duckdb_returns(answers, sql):
     assert not isinstance(got, str), f"q refused {q}: {got}"
     ordered = bool(sqlglot.parse_one(sql, read="duckdb").args.get("order"))
     assert same(got, expected, ordered), f"{q}\nq:      {got}\nduckdb: {expected}"
+
+
+# Hand-written q, read: run in q, and as the SQL it reads as in DuckDB.
+from tests.integration.test_temporal import TICKS  # noqa: E402
+
+READ_RUN = [
+    # q's parse of text, "D"$: TRY_CAST, null where it is no date.
+    'select sym, d:"D"$string sym, n:"J"$string sym from trades',
+    # count each string s: each text's length.
+    "select sym, c:count each string sym from trades",
+    # Functional selects, ?[t;c;b;a].
+    "?[trades;enlist (>;`qty;100);0b;()]",
+    "?[trades;((>;`qty;10);(=;`sym;enlist `a));0b;()]",
+    "?[trades;();(enlist `sym)!enlist `sym;(enlist `n)!enlist (count;`i)]",
+    "?[trades;();(enlist `sym)!enlist `sym;`mx`tot!((max;`px);(sum;`qty))]",
+    "?[trades;enlist (<;`px;2);0b;`sym`px!`sym`px]",
+    "?[trades;();1b;(enlist `sym)!enlist `sym]",
+]
+
+
+@pytest.mark.parametrize("q", READ_RUN, ids=READ_RUN)
+def test_q_read_back_runs_the_same(q):
+    got = run_q(TICKS, [q])[0]
+    assert not isinstance(got, str), got
+    sql = sqlglot.transpile(q, read="q", write="duckdb")[0]
+    assert same(got, run_duckdb(TICKS, sql), False), sql

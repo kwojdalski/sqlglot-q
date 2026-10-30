@@ -76,6 +76,7 @@ from sqlglot_q.generator import (
     SIGN,
     SUBSTRING,
     SUBSTRING_FROM,
+    TEMPORAL_PARSE,
     TEXT_AGG,
     TEXT_BOOL,
     TEXT_CMP,
@@ -499,6 +500,15 @@ class Statement:
                 self.fail("a boolean vector has no SQL form")
             return exp.Boolean(this=bits == "1")
         if tok.kind == "str":
+            letters = {v: k for k, v in (PARSE | TEMPORAL_PARSE).items()}
+            if tok.value in letters and self.is_("$") and not self.peek(1).kind == "str":
+                # "D"$x: q's parse of text, null where it is no date.
+                self.next()
+                arg = self.expr(stop)
+                if isinstance(arg, exp.Cast) and arg.to.this == exp.DataType.Type.VARCHAR:
+                    arg = arg.this  # "D"$string d: the symbols' text
+                to = next(k for k, v in TYPES.items() if v[0] == letters[tok.value])
+                return exp.TryCast(this=literal(arg), to=exp.DataType.build(to))
             return Chars(this=tok.value)
         if tok.kind == "sym":
             if self.is_("$"):
@@ -511,6 +521,8 @@ class Statement:
             return self.lambda_call(tok.text, stop)
         if tok.text == "(":
             return self.parenthesised()
+        if tok.text == "?" and self.is_("[") and self.bracket_arity() == 4:
+            return self.functional()
         if tok.text == "?" and self.is_("["):
             return self.conditional()
         if tok.kind == "name":
@@ -544,6 +556,16 @@ class Statement:
             else:
                 args = [self.expr(stop)]
             return exp.Anonymous(this=name, expressions=args)
+        if word == "count" and self.is_("each"):
+            # count each string s: each text's length. (A null symbol's
+            # string is "", of length 0, where SQL's LENGTH is NULL.)
+            self.next()
+            arg = self.expr(stop)
+            if isinstance(arg, exp.Cast) and arg.to.this == exp.DataType.Type.VARCHAR:
+                inner = arg.this
+                length = exp.Length(this=inner)
+                return exp.Coalesce(this=length, expressions=[exp.Literal.number(0)])
+            self.fail("count each is read on the text of a column, count each string x")
         if word in MONADS and self.is_("[") and not self.is_(";", 2):
             # sum[qty] is sum qty: the one argument in brackets.
             self.expect("[")
@@ -970,7 +992,7 @@ class Statement:
             return QCall(this=self.expr(stop), fn="sums")
         if text in (RUNNING_MAX, RUNNING_MIN):
             return QCall(this=self.expr(stop), fn="maxs" if text == RUNNING_MAX else "mins")
-        for letter, name in {v: k for k, v in PARSE.items()}.items():
+        for letter, name in {v: k for k, v in (PARSE | TEMPORAL_PARSE).items()}.items():
             if text == TRY_PARSE.replace("L", letter):
                 to = next(k for k, v in TYPES.items() if v[0] == name)
                 return exp.TryCast(this=self.expr(stop), to=exp.DataType.build(to))
@@ -1164,6 +1186,144 @@ class Statement:
             ifs += other.args["ifs"]
             other = other.args.get("default")
         return exp.Case(ifs=ifs, default=other)
+
+    def bracket_arity(self) -> int:
+        """The arguments of the bracket ahead: ; at its own depth, plus one."""
+        depth, count, j = 0, 1, self.i
+        while j < len(self.t):
+            text = self.t[j].text
+            if text in "([" and self.t[j].kind == "punct":
+                depth += 1
+            elif text in ")]" and self.t[j].kind == "punct":
+                depth -= 1
+                if depth == 0:
+                    return count
+            elif text == ";" and depth == 1:
+                count += 1
+            j += 1
+        return count
+
+    def functional(self) -> exp.Expr:
+        """?[t;c;b;a], q's functional select: c a list of parse trees
+        (constraints), b 0b, 1b (distinct) or a dict of by keys, a () or a
+        dict of columns. Each tree is read as the plain select's expression."""
+        self.expect("[")
+        source = self.expr(set())
+        self.expect(";")
+        constraints = self.tree()
+        self.expect(";")
+        by = self.tree()
+        self.expect(";")
+        columns = self.tree()
+        self.expect("]")
+
+        def items(node) -> list:
+            return node if isinstance(node, list) else [node]
+
+        conds = [] if constraints == [] else items(constraints)
+        if conds and not isinstance(conds[0], list) and isinstance(constraints, list):
+            conds = [constraints]  # enlist (>;`a;1) read as the tree itself
+        where = conjunction([self.from_tree(c) for c in conds]) if conds else None
+        distinct, keys = False, []
+        if isinstance(by, exp.Boolean):
+            distinct = by.this
+        elif isinstance(by, dict):
+            keys = [exp.alias_(self.from_tree(v), k) for k, v in by.items()]
+        elif by != []:
+            self.fail("a functional select's by is 0b, 1b or a dict")
+        if isinstance(columns, dict):
+            cols = [exp.alias_(self.from_tree(v), k) for k, v in columns.items()]
+        elif columns == []:
+            cols = []
+        else:
+            self.fail("a functional select's columns are () or a dict")
+        if keys:
+            cols = [per_group(c, keys) for c in cols]
+        return select(self, cols, keys, source, where, distinct)
+
+    def tree(self):
+        """A q parse tree: (f;x;y) a list, `c a column's name, enlist v a
+        literal v, k!v a dict, () empty."""
+        tok = self.next()
+        if tok.text == "(":
+            if self.is_(")"):
+                self.next()
+                return []
+            parts = [self.tree_item()]
+            while self.is_(";"):
+                self.next()
+                parts.append(self.tree_item())
+            self.expect(")")
+            node = parts if len(parts) > 1 else parts[0]
+        elif tok.kind == "name" and tok.text == "enlist":
+            inner = self.tree()
+            node = [inner] if isinstance(inner, list) else ("lit", inner)
+        elif tok.kind == "sym":
+            node = ("col", tok.value) if len(tok.value) > 1 else ("col", tok.value[0])
+        elif tok.kind == "bool":
+            node = exp.Boolean(this=tok.text[:-1] == "1")
+        elif tok.kind in ("num", "str", "temporal"):
+            self.i -= 1
+            node = ("lit", self.term(set()))
+        else:
+            self.fail(f"unexpected {tok.text!r} in a parse tree")
+        if self.is_("!"):
+            self.next()
+            values = self.tree()
+            if isinstance(node, tuple) and node[0] == "lit" and isinstance(node[1], tuple):
+                node = node[1]  # (enlist `n)!...: a list of one name
+            if isinstance(values, tuple) and values[0] == "lit" and isinstance(values[1], tuple):
+                values = values[1]  # ...!enlist (count;`i): a list of one tree
+            names = node[1] if isinstance(node, tuple) and node[0] == "col" else None
+            if isinstance(node, list):
+                names = [n[1] for n in node]
+            if isinstance(names, str):
+                names = [names]
+            if isinstance(values, tuple) and values[0] == "col" and isinstance(values[1], list):
+                values = [("col", v) for v in values[1]]  # `a`b: a column each
+            if (
+                isinstance(values, list)
+                and len(values) == 1
+                and isinstance(values[0], list)
+                and len(names) == 1
+            ):
+                values = values[0] if values[0] and isinstance(values[0][0], list) else values
+            elif not (isinstance(values, list) and len(names) > 1):
+                values = [values]
+            if names is None or len(names) != len(values):
+                self.fail("a dict in a parse tree pairs names with trees")
+            return dict(zip(names, values, strict=True))
+        return node
+
+    def tree_item(self):
+        tok = self.peek()
+        named = tok.kind == "name" and tok.text in MONADS | KEYWORD_DYADS and tok.text != "enlist"
+        if tok.kind == "op" or named:
+            self.next()
+            return ("fn", tok.text)
+        return self.tree()
+
+    def from_tree(self, node) -> exp.Expr:
+        if isinstance(node, tuple) and node[0] == "col":
+            names = node[1]
+            if isinstance(names, list):
+                return exp.column(names[0]) if len(names) == 1 else self.fail("one name")
+            return exp.column(names)
+        if isinstance(node, tuple) and node[0] == "lit":
+            value = node[1]
+            if isinstance(value, tuple) and value[0] == "col":
+                return exp.Literal.string(value[1])  # enlist `a: the symbol `a
+            return value
+        if isinstance(node, list) and node and isinstance(node[0], tuple) and node[0][0] == "fn":
+            fn, args = node[0][1], [self.from_tree(a) for a in node[1:]]
+            if len(args) == 2:
+                return self.dyad(fn, args[0], args[1])
+            if len(args) == 1:
+                return self.monad(fn, args[0]) if fn in MONADS else self.fail(f"{fn} of one")
+            self.fail(f"{fn} of {len(args)} arguments has no SQL form here")
+        if isinstance(node, exp.Expr):
+            return node
+        self.fail("a parse tree with no SQL form here")
 
     def conditional(self) -> exp.Expr:
         self.expect("[")

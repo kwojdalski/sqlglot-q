@@ -163,6 +163,8 @@ TEXT_GREATEST = (
 )
 TEXT_LEAST = TEXT_GREATEST.replace(">=", "<=")
 PARSE = {"boolean": "B", "short": "H", "int": "I", "long": "J", "real": "E", "float": "F"}
+# TRY_CAST of text to a date, a timestamp or a time of day: q's parse of it.
+TEMPORAL_PARSE = {"date": "D", "timestamp": "P", "time": "T"}
 TEXT_AGG = '{{$[all {null} x;"";({sep}) sv x where not {null} x]}}'.replace(
     "{null}", TEXT_NULL.replace("{", "{{").replace("}", "}}")
 )
@@ -1029,10 +1031,11 @@ class QGenerator(Generator):
     def trycast_sql(self, node: exp.TryCast) -> str:
         # q's parse of text ("J"$) is null where SQL's TRY_CAST is NULL.
         kind = node.to.this
-        if is_text(node.this) or kind not in TYPES or TYPES[kind][0] not in PARSE:
+        letters = PARSE | TEMPORAL_PARSE
+        if is_text(node.this) or kind not in TYPES or TYPES[kind][0] not in letters:
             return self.cast_sql(exp.Cast(this=node.this.copy(), to=node.to.copy()))
         # A column: parsed when it holds text, cast as it is otherwise.
-        letter = PARSE[TYPES[kind][0]]
+        letter = letters[TYPES[kind][0]]
         return f"{TRY_PARSE.replace('L', letter)} {self.operand(node.this)}"
 
     def withingroup_sql(self, node: exp.WithinGroup) -> str:
