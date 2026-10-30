@@ -153,6 +153,25 @@ def join_conditions(expression: exp.Expr) -> exp.Expr:
             if keys and rest:
                 join.set("on", exp.and_(*keys, copy=False))
                 moved.extend(rest)
+        elif side == "LEFT" and on is not None and isinstance(join.this, exp.Table):
+            # A left join's condition on the right side alone picks which of
+            # its rows can match: FROM t LEFT JOIN (SELECT * FROM u WHERE
+            # u.v > 15) AS u ON t.k = u.k, the same rows.
+            keys = [c for c in conjuncts(on) if key_pair(c, seen, name)]
+            rest = [c for c in conjuncts(on) if not key_pair(c, seen, name)]
+            cols = [c for r in rest for c in r.find_all(exp.Column)]
+            own = all(c.table == name for c in cols) and not any(
+                r.find(exp.Subquery, exp.AggFunc, exp.Window) for r in rest
+            )
+            if keys and rest and cols and own:
+                inner_select = exp.select("*").from_(join.this.copy()).where(*rest)
+                join.set(
+                    "this",
+                    exp.Subquery(
+                        this=inner_select, alias=exp.TableAlias(this=exp.to_identifier(name))
+                    ),
+                )
+                join.set("on", exp.and_(*(k.copy() for k in keys), copy=False))
         elif inner and on is None and not join.args.get("using") and kind != "CROSS":
             keys = [c for c in remaining if key_pair(c, seen, name)]
             if keys:
@@ -165,8 +184,44 @@ def join_conditions(expression: exp.Expr) -> exp.Expr:
     return expression
 
 
+def semi_joins(expression: exp.Expr) -> exp.Expr:
+    """SEMI and ANTI JOIN, as the EXISTS and NOT EXISTS they are: the left
+    rows with (without) a match, once each, of the left side's columns. A
+    null key matches nothing, so ANTI keeps its row, as NOT EXISTS does."""
+    if not isinstance(expression, exp.Select) or not expression.args.get("joins"):
+        return expression
+    joins = expression.args["joins"]
+    kinds = [(j.args.get("kind") or "").upper() for j in joins]
+    if not any(k in ("SEMI", "ANTI") for k in kinds):
+        return expression
+    from_ = expression.args.get("from_")
+    if len(joins) != 1 or from_ is None or not isinstance(from_.this, exp.Table):
+        return expression  # left as it is, and refused
+    join, left = joins[0], from_.this.alias_or_name
+    if join.args.get("side") or join.args.get("method"):
+        return expression
+    name = join.this.alias_or_name
+    using = join.args.get("using") or []
+    conds = [
+        exp.EQ(this=exp.column(u.name, table=left), expression=exp.column(u.name, table=name))
+        for u in using
+    ]
+    if join.args.get("on") is not None:
+        conds.append(join.args["on"].copy())
+    if not conds:
+        return expression
+    test = exp.Exists(this=exp.select("1").from_(join.this.copy()).where(*conds))
+    expression = expression.copy()
+    expression.set("joins", None)
+    return expression.where(exp.Not(this=test) if kinds[0] == "ANTI" else test, copy=False)
+
+
 def conjuncts(node: exp.Expr) -> list[exp.Expr]:
-    return list(node.flatten()) if isinstance(node, exp.And) else [node]
+    """The parts of an AND, through any parentheses around them."""
+    node = node.unnest()
+    if not isinstance(node, exp.And):
+        return [node]
+    return [part for side in (node.this, node.expression) for part in conjuncts(side)]
 
 
 def key_pair(cond: exp.Expr, left: set[str], right: str) -> bool:

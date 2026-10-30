@@ -19,6 +19,20 @@ QUERIES = [
     # CONCAT_WS reads back.
     "SELECT g, CONCAT_WS('/', g, s) AS x FROM t",
     "SELECT g, CONCAT_WS('ab', s) AS x FROM t",
+    # A join's ON of more than one other condition: generation parenthesises
+    # them, and the parts are read through the parentheses.
+    "SELECT t.g, n, v FROM t JOIN u ON t.g = u.g AND u.v > 15 AND n > 0",
+    # A LEFT JOIN's condition on the right side alone: that side, filtered.
+    "SELECT t.g, n, v FROM t LEFT JOIN u ON t.g = u.g AND u.v > 15",
+    "SELECT t.g, n, v FROM t LEFT JOIN u ON t.g = u.g AND u.v > 15 AND u.v < 30 WHERE n > 0",
+    "SELECT a.g, n, b.v FROM t AS a LEFT JOIN u AS b ON a.g = b.g AND b.v > 15",
+    "SELECT t.g, COUNT(u.v) AS c FROM t LEFT JOIN u ON t.g = u.g AND u.v > 15 GROUP BY t.g",
+    # SEMI and ANTI JOIN: EXISTS and NOT EXISTS.
+    "SELECT * FROM t SEMI JOIN u USING (g)",
+    "SELECT * FROM t ANTI JOIN u USING (g)",
+    "SELECT g, n FROM t SEMI JOIN u ON t.g = u.g AND u.v > 15",
+    "SELECT g, n FROM t AS a ANTI JOIN u AS b ON a.g = b.g",
+    "SELECT g, COUNT(*) AS c FROM t ANTI JOIN u USING (g) GROUP BY g",
 ]
 
 # On trades and quotes.

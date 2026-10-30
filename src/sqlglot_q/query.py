@@ -24,7 +24,11 @@ if TYPE_CHECKING:
 
 
 def conjuncts(node: exp.Expr) -> list[exp.Expr]:
-    return list(node.flatten()) if isinstance(node, exp.And) else [node]
+    """The parts of an AND, through any parentheses around them."""
+    node = node.unnest()
+    if not isinstance(node, exp.And):
+        return [node]
+    return [part for side in (node.this, node.expression) for part in conjuncts(side)]
 
 
 def unalias(node: exp.Expr) -> exp.Expr:

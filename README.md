@@ -71,7 +71,7 @@ licence, such as the free personal one). The translation does not.
   ...)`, and `CASE` without `ELSE`
 - `ORDER BY ... NULLS FIRST/LAST`, and DuckDB's default of nulls last
 - joins on differently named keys (`ON t.a = u.k`), `RIGHT JOIN`,
-  `FROM t, u`, and `SELECT * EXCLUDE (...)`
+  `SEMI`/`ANTI JOIN`, `FROM t, u`, and `SELECT * EXCLUDE (...)`
 - `QUALIFY` and `DISTINCT ON` (through sqlglot's own rewrites), `GROUP BY ALL`
 - `MEDIAN`, `STDDEV`/`VARIANCE` (sample and population), `CORR`, `COVAR_*`,
   `COUNT_IF`, `ANY_VALUE`, `LOG(b, x)`/`LOG10`/`LOG2`, `STARTS_WITH`,
