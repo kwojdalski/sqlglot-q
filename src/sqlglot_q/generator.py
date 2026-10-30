@@ -65,6 +65,24 @@ MONADIC = {
     exp.Sqrt: "sqrt",
     exp.Exp: "exp",
     exp.Ln: "log",
+    exp.Sin: "sin",
+    exp.Cos: "cos",
+    exp.Tan: "tan",
+    exp.Asin: "asin",
+    exp.Acos: "acos",
+    exp.Atan: "atan",
+}
+# Functions sqlglot does not know, by name: q lambdas (aggregates first
+# enlisted, as scalars.py's).
+ANONYMOUS = {
+    "GCD": ("{{$[null[x]|null y;0N;{$[y=0;abs x;.z.s[y;x mod y]]}[x;y]]}'[x;y]}", False),
+    "LCM": (
+        "{{$[null[x]|null y;0N;0=x*y;0;abs[x*y] div {$[y=0;abs x;.z.s[y;x mod y]]}[x;y]]}'[x;y]}",
+        False,
+    ),
+    "EVEN": ("{(signum x)*2*ceiling (abs x)%2}", False),
+    "BIT_COUNT": ("{{$[null x;0N;`long$sum 0b vs x]} each x}", False),
+    "PRODUCT": ("{$[count w:x where not null x;prd w;x 0N]}", True),
 }
 
 # Spelled as lambdas because q has no word for them; parser.py reads these
@@ -98,6 +116,9 @@ TEXT_MAX = f"last {{x iasc {TEXT_KEY} x}}"
 TEXT_PICK = "{$[x;y;z]}'"  # CASE over text: ?[...] cannot pick strings
 TEXT_LENGTH = "{?[0=count each x;0N;count each x]}"
 TEXT_FILL = "{$[0=count x;y;x]}'"  # COALESCE over text
+# TRY_CAST of a column to a number: q's parse ("J"$) of the text, null where
+# it is no number. L is the type's letter.
+TRY_PARSE = '{$[11h=abs t:type x;"L"$string x;0h=t;"L"$x;"L"$string x]}'
 # TIME_BUCKET: x xbar y, but a date (of a width dividing a day) as it is.
 BUCKET = "{$[14h=abs type y;y;x xbar y]}"
 # String mode, where a column's type is not known: strings (and a string)
@@ -156,8 +177,15 @@ NTILE = "{n:count y;s:n div x;r:n mod x;j:til n;1+?[j<r*s+1;j div s+1;r+(j-r*s+1
 PERCENT_RANK = "{$[1=count x;(count x)#0f;(x?x)%-1+count x]}"
 CUME_DIST = "{(1+til count x)%count x}"
 # LEFT(s, n) and RIGHT(s, n): sublist, not #, which repeats a short string.
-LEFT = ("{`$x sublist/:string y}", "{x sublist/:y}")
-RIGHT = ("{`$(neg x) sublist/:string y}", "{(neg x) sublist/:y}")
+# LEFT(s, -n) is all but the last n characters, RIGHT(s, -n) all but the first.
+LEFT = (
+    "{`${$[x<0;x _ y;x sublist y]}[x] each string y}",
+    "{{$[x<0;x _ y;x sublist y]}[x] each y}",
+)
+RIGHT = (
+    "{`${$[x<0;(neg x)_ y;(neg x) sublist y]}[x] each string y}",
+    "{{$[x<0;(neg x)_ y;(neg x) sublist y]}[x] each y}",
+)
 
 # SQL type names to the q type each casts to, and the empty list a new column
 # of that type starts as. Text is a symbol unless string_literals="string".
@@ -825,7 +853,48 @@ class QGenerator(Generator):
     sum_sql = avg_sql = min_sql = max_sql = aggregate
 
     def monadic(self, node: exp.Expr) -> str:
+        if node.args.get("expression") is not None:
+            return self.refuse(f"{node.key.upper()} of two arguments has no q translation here")
         return f"{MONADIC[type(node)]} {self.sql(node.this)}"
+
+    sin_sql = cos_sql = tan_sql = asin_sql = acos_sql = atan_sql = monadic
+
+    def concatws_sql(self, node: exp.ConcatWs) -> str:
+        # CONCAT_WS(sep, a, b): the non-null parts joined by sep.
+        sep, *parts = node.expressions
+        if not (isinstance(sep, exp.Literal) and sep.is_string):
+            return self.refuse("CONCAT_WS is translated with a literal separator")
+        items = ";".join(self.sql(p) for p in parts)
+        sep_text = f"({self.chars(sep.this)})"
+        if self.symbols:
+            body = f"{{`${sep_text} sv string x where not null x}}"
+        else:
+            body = f"{{{sep_text} sv x where 0<count each x}}"
+        if len(parts) == 1:
+            return f"{body} each enlist each {self.operand(parts[0])}"
+        return f"{body} each flip ({items})"
+
+    def trycast_sql(self, node: exp.TryCast) -> str:
+        # q's parse of text ("J"$) is null where SQL's TRY_CAST is NULL.
+        kind = node.to.this
+        if is_text(node.this) or kind not in TYPES or TYPES[kind][0] not in PARSE:
+            return self.cast_sql(exp.Cast(this=node.this.copy(), to=node.to.copy()))
+        # A column: parsed when it holds text, cast as it is otherwise.
+        letter = PARSE[TYPES[kind][0]]
+        return f"{TRY_PARSE.replace('L', letter)} {self.operand(node.this)}"
+
+    def withingroup_sql(self, node: exp.WithinGroup) -> str:
+        # PERCENTILE_CONT(q) WITHIN GROUP (ORDER BY x): QUANTILE_CONT(x, q).
+        fn, order = node.this, node.expression
+        terms = order.expressions if isinstance(order, exp.Order) else []
+        if (
+            isinstance(fn, (exp.PercentileCont, exp.PercentileDisc))
+            and len(terms) == 1
+            and not terms[0].args.get("desc")
+        ):
+            kind = type(fn)
+            return self.sql(kind(this=terms[0].this.copy(), expression=fn.this.copy()))
+        return self.refuse("WITHIN GROUP is translated for PERCENTILE_CONT and PERCENTILE_DISC")
 
     def sign_sql(self, node) -> str:
         return f"{SIGN} {self.operand(node.this)}"
@@ -1204,6 +1273,10 @@ class QGenerator(Generator):
         return f"?[{self.condition(node.this)};{self.sql(node.args['true'])};{self.sql(otherwise)}]"
 
     def anonymous_sql(self, node: exp.Anonymous) -> str:
+        if node.name.upper() in ANONYMOUS and node.name.upper() not in self.FUNCTIONS:
+            fn, aggregate = ANONYMOUS[node.name.upper()]
+            text = f"{fn}[{';'.join(self.sql(a) for a in node.expressions)}]"
+            return f"first enlist {text}" if aggregate else text
         word = self.FUNCTIONS.get(node.name.upper())
         if word is None:
             return self.refuse(

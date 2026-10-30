@@ -24,6 +24,7 @@ from sqlglot.errors import ParseError
 from sqlglot_q import scalars
 from sqlglot_q.canonical import canonical
 from sqlglot_q.generator import (
+    ANONYMOUS,
     ANY_FILL,
     BOOL_AND,
     BOOL_OR,
@@ -51,6 +52,7 @@ from sqlglot_q.generator import (
     NON_NULL,
     NTILE,
     NULLS,
+    PARSE,
     PERCENT_RANK,
     QUARTER,
     REPLACE,
@@ -77,6 +79,7 @@ from sqlglot_q.generator import (
     TEXT_PICK,
     TEXT_SPREAD,
     TRUNC,
+    TRY_PARSE,
     TUPLE_IN,
     TYPES,
 )
@@ -97,6 +100,12 @@ MONADIC = {
     "sqrt": exp.Sqrt,
     "exp": exp.Exp,
     "log": exp.Ln,
+    "sin": exp.Sin,
+    "cos": exp.Cos,
+    "tan": exp.Tan,
+    "asin": exp.Asin,
+    "acos": exp.Acos,
+    "atan": exp.Atan,
 }
 GLYPHS = {
     "=": exp.EQ,
@@ -361,6 +370,8 @@ class Statement:
                 table(self, node.meta["of"]), copy=False
             )
         for column in node.find_all(exp.Column):
+            if column.name == "q_keys" and not column.table:
+                self.fail("flip of columns is read only as a window's order keys")
             if column.name == "i" and not column.table:
                 self.fail("i is q's row index, and SQL's rows have no order to number")
         from sqlglot_q.qnulls import faithful
@@ -482,6 +493,12 @@ class Statement:
             return self.query(word, stop)
         if word in NOW:
             return NOW[word]()
+        if word == "flip" and self.is_("("):
+            # flip(o;n): a window's order keys, as one key of rows (RANK and
+            # DENSE_RANK of several). The window's order is the sort ahead.
+            self.next()  # (, which parenthesised expects taken
+            self.parenthesised()
+            return exp.column("q_keys")
         if word == "ej" and self.is_("["):
             return self.equijoin()
         if word == "aj" and self.is_("["):
@@ -568,6 +585,13 @@ class Statement:
             and call.aggregate
         ):
             return arg.this  # first enlist f[...]: an aggregate of scalars.py
+        if (
+            word == "first"
+            and isinstance(arg, Enlisted)
+            and isinstance(arg.this, exp.Anonymous)
+            and ANONYMOUS.get(arg.this.name, ("", False))[1]
+        ):
+            return arg.this  # first enlist PRODUCT[...]
         if (
             word == "first"
             and isinstance(arg, Enlisted)
@@ -854,6 +878,19 @@ class Statement:
             return QCall(this=self.expr(stop), fn="sums")
         if text in (RUNNING_MAX, RUNNING_MIN):
             return QCall(this=self.expr(stop), fn="maxs" if text == RUNNING_MAX else "mins")
+        for letter, name in {v: k for k, v in PARSE.items()}.items():
+            if text == TRY_PARSE.replace("L", letter):
+                to = next(k for k, v in TYPES.items() if v[0] == name)
+                return exp.TryCast(this=self.expr(stop), to=exp.DataType.build(to))
+        named = next((n for n, (fn, _) in ANONYMOUS.items() if fn == text), None)
+        if named is not None and self.is_("["):
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            return exp.Anonymous(this=named, expressions=[literal(a) for a in args])
         if text == IN_ANY and self.is_("["):
             self.expect("[")
             subject = self.expr(set())
@@ -1148,7 +1185,8 @@ class Statement:
                 return TypedAs(this=right)
         if op in WINDOW_DYADS:
             return QCall(this=right, fn=op, n=left)
-        if op == "?" and isinstance(left, exp.Column) and left == right:
+        if op == "?" and isinstance(bare(left), exp.Column) and bare(left) == bare(right):
+            right = bare(right)
             return QCall(this=right, fn="find")
         if op == "xbar":
             if isinstance(left, exp.Interval):
@@ -1789,6 +1827,8 @@ def per_group(item: exp.Expr, keys: list[exp.Expr]) -> exp.Expr:
     columns = [c for c in value.find_all(exp.Column) if c.name not in names]
     if not columns or value.find(exp.AggFunc, exp.Window, exp.Select, exp.Subquery):
         return item
+    if any(ANONYMOUS.get(a.name, ("", False))[1] for a in value.find_all(exp.Anonymous)):
+        return item  # PRODUCT(x): an aggregate sqlglot does not know
     if any(isinstance(n, HELPERS) for n in value.walk()):
         return item  # a q helper the select reads itself
     if not isinstance(item, exp.Alias):

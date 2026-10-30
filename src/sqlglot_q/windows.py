@@ -166,7 +166,7 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
     if isinstance(fn, (exp.PercentRank, exp.CumeDist)):
         if not order:
             raise Refused(f"{type(fn).__name__} needs an ORDER BY")
-        key = order[0] if len(order) == 1 else f"flip({';'.join(order)})"
+        key = order[0] if len(order) == 1 else f"(flip({';'.join(order)}))"
         if isinstance(fn, exp.PercentRank):
             return f"{PERCENT_RANK} {key}", False, True
         # The share of rows at or before this one, peers included.
@@ -174,7 +174,7 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
     if isinstance(fn, (exp.Rank, exp.DenseRank)):
         if not order:
             raise Refused("RANK needs an ORDER BY")
-        key = order[0] if len(order) == 1 else f"flip({';'.join(order)})"
+        key = order[0] if len(order) == 1 else f"(flip({';'.join(order)}))"
         if isinstance(fn, exp.Rank):
             return f"1+{key}?{key}", False, True
         return f"sums differ {key}", False, True

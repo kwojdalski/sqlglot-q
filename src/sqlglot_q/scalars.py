@@ -205,6 +205,78 @@ CALLS = [
         exp.TimeToUnix,
         "{n:(`long$`timestamp$x)-`long$1970.01.01D0;(n div 1000000000)+(n mod 1000000000)%1e9}",
     ),
+    # Math. ATAN2(y, x) by the half-angle form; 0 at the origin, as SQL.
+    Call(exp.Atan2, "{?[(x=0)&y=0;0f;2*atan x%(sqrt (x*x)+y*y)+y]}", keys=("this", "expression")),
+    Call(exp.Degrees, "{x*180%3.141592653589793}"),
+    Call(exp.Radians, "{x*3.141592653589793%180}"),
+    Call(exp.Cbrt, "{(signum x)*xexp[abs x;1%3]}"),
+    Call(exp.Factorial, "{{$[null x;0N;prd 1+til x]} each x}"),
+    Call(exp.IsInf, "{x in -0w 0w}"),
+    # Bits, through q's 64-bit boolean vectors: 0b vs x and 2 sv.
+    *(
+        Call(
+            kind,
+            f"{{{{$[null[x]|null y;0N;2 sv (0b vs x){glyph}0b vs y]}}'[x;y]}}",
+            keys=("this", "expression"),
+        )
+        for kind, glyph in ((exp.BitwiseAnd, "&"), (exp.BitwiseOr, "|"), (exp.BitwiseXor, "<>"))
+    ),
+    Call(
+        exp.BitwiseLeftShift,
+        "{{$[null[x]|null y;0N;x*`long$2 xexp y]}'[x;y]}",
+        keys=("this", "expression"),
+    ),
+    Call(
+        exp.BitwiseRightShift,
+        "{{$[null[x]|null y;0N;x div `long$2 xexp y]}'[x;y]}",
+        keys=("this", "expression"),
+    ),
+    Call(exp.BitwiseNot, "{{$[null x;0N;2 sv not 0b vs x]} each x}"),
+    # Text: MD5's hex digest; TRANSLATE drops what has no counterpart.
+    Call(exp.MD5, "{`${raze string md5 x} each string x}", "{{raze string md5 x} each x}"),
+    Call(
+        exp.Translate,
+        '{`${k:y?x;h:k<count y;r:@[x;where h;:;((count y)#z,(count y)#" ") k where h];'
+        "r where not h&k>=count z}[;y;z] each string x}",
+        '{{k:y?x;h:k<count y;r:@[x;where h;:;((count y)#z,(count y)#" ") k where h];'
+        "r where not h&k>=count z}[;y;z] each x}",
+        keys=("this", "from_", "to"),
+        chars=("from_", "to"),
+    ),
+    # Aggregates of moments and bits; sample skewness and excess kurtosis.
+    Call(
+        exp.Skewness,
+        "{v:x where not null x;n:count v;m:avg v;s:sdev v;"
+        "$[n<3;0n;(n%(n-1)*n-2)*(sum xexp[v-m;3])%s xexp 3]}",
+        aggregate=True,
+    ),
+    Call(
+        exp.Kurtosis,
+        "{v:x where not null x;n:count v;d:v-avg v;"
+        "$[n<4;0n;(((n+1)*(-3+(avg d*d*d*d)%xexp[avg d*d;2]))+6)*(n-1)%(n-2)*n-3]}",
+        aggregate=True,
+    ),
+    *(
+        Call(
+            kind,
+            f"{{$[count w:x where not null x;2 sv ({glyph}/) 0b vs' w;x 0N]}}",
+            aggregate=True,
+        )
+        for kind, glyph in (
+            (exp.BitwiseAndAgg, "&"),
+            (exp.BitwiseOrAgg, "|"),
+            (exp.BitwiseXorAgg, "<>"),
+        )
+    ),
+    # QUANTILE_DISC: the first value whose share of the rows reaches y.
+    Call(
+        exp.PercentileDisc,
+        "{v:asc x where not null x;$[count v;v 0|-1+ceiling y*count v;x 0N]}",
+        keys=("this", "expression"),
+        aggregate=True,
+    ),
+    # APPROX_COUNT_DISTINCT, counted exactly.
+    Call(exp.ApproxDistinct, "{count distinct x where not null x}", aggregate=True),
     # Aggregates, each over the non-null values and NULL over none.
     Call(
         exp.ArgMax,
