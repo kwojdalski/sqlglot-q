@@ -77,6 +77,7 @@ from sqlglot_q.generator import (
     SUBSTRING,
     SUBSTRING_FROM,
     TEXT_AGG,
+    TEXT_BOOL,
     TEXT_CMP,
     TEXT_FILL,
     TEXT_GREATEST,
@@ -865,6 +866,9 @@ class Statement:
                 items = [*head.expressions, literal(second)]
                 return kind(this=head.this, expressions=items, ignore_nulls=True)
             return kind(this=head, expressions=[literal(second)], ignore_nulls=True)
+        if text == TEXT_BOOL:
+            arg = self.expr(stop)
+            return exp.Cast(this=literal(arg), to=exp.DataType.build("BOOLEAN"))
         if text == TEXT_CMP:
             return self.expr(stop)  # strings compared as symbols: the values
         if text == ANY_FILL and self.is_("["):
@@ -2004,8 +2008,14 @@ def qualify_dropped(node: exp.Select) -> None:
     owner = {}
     for name in names:
         keeping = [s for s in sides if name not in drops(s)]
-        if len(keeping) == 1 and keeping[0].alias_or_name:
-            owner[name] = keeping[0].alias_or_name
+        if len(keeping) != 1:
+            continue
+        side = keeping[0]
+        if isinstance(side, exp.Subquery) and not side.alias:
+            # A query joined: named, so its columns can be told apart.
+            side.set("alias", exp.TableAlias(this=exp.to_identifier(f"q_s{sides.index(side)}")))
+        if side.alias_or_name:
+            owner[name] = side.alias_or_name
     if not owner:
         return
     for col in node.find_all(exp.Column):

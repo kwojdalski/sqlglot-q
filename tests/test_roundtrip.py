@@ -41,6 +41,9 @@ from tests.integration.test_sql_more import QUERIES as MORE
 from tests.integration.test_sql_sweep import QUERIES as SWEEP
 from tests.integration.test_sql_sweep2 import ONE_WAY
 from tests.integration.test_sql_sweep2 import QUERIES as SWEEP2
+from tests.integration.test_sql_sweep3 import CALENDAR_QUERIES as SWEEP3_CALENDAR
+from tests.integration.test_sql_sweep3 import ONE_WAY as ONE_WAY3
+from tests.integration.test_sql_sweep3 import QUERIES as SWEEP3
 from tests.integration.test_sqlglot_native import DATA as NATIVE_DATA
 from tests.integration.test_sqlglot_native import QUERIES as NATIVE
 from tests.integration.test_sqlglot_native import SCRIPTS
@@ -91,6 +94,7 @@ SQL = (
     + MORE
     + SWEEP
     + [q for q in SWEEP2 if q not in ONE_WAY]
+    + [q for q in SWEEP3 + SWEEP3_CALENDAR if q not in ONE_WAY3]
 )
 from tests.integration.test_reading import QUERIES as READING  # noqa: E402
 
@@ -119,6 +123,7 @@ SELECTS += [(sql, False) for sql in CALENDAR]
 SELECTS += [(sql, False) for sql in MORE]
 SELECTS += [(sql, False) for sql in SWEEP]
 SELECTS += [(sql, False) for sql in SWEEP2 if sql not in ONE_WAY]
+SELECTS += [(sql, False) for sql in SWEEP3 + SWEEP3_CALENDAR if sql not in ONE_WAY3]
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
@@ -138,9 +143,9 @@ def test_sql_read_back_from_q_means_the_same(sql, ordered):
         else MORE_NULL_DATA
         if sql in MORE_NULLS
         else CALENDAR_DATA
-        if sql in CALENDAR
+        if sql in CALENDAR or sql in SWEEP3_CALENDAR
         else MORE_DATA
-        if sql in MORE or sql in SWEEP or sql in SWEEP2
+        if sql in MORE or sql in SWEEP or sql in SWEEP2 or sql in SWEEP3
         else TABLES
     )
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back

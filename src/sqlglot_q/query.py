@@ -92,7 +92,7 @@ def others_names(node: exp.Select) -> dict[str, list[str]]:
                     keys.add(c.this.name)
     owned: dict[str, set[str]] = {}
     for col in node.find_all(exp.Column):
-        if col.table in tables and col.find_ancestor(exp.Select) is node:
+        if col.table and col.table in tables and col.find_ancestor(exp.Select) is node:
             if col.find_ancestor(exp.Join) is None:
                 owned.setdefault(col.table, set()).add(col.name)
     out = {}

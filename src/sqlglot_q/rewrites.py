@@ -592,3 +592,52 @@ def like_any(expression: exp.Expr) -> exp.Expr:
         return exp.Paren(this=either)
 
     return expression.transform(rewrite)
+
+
+def row_values(expression: exp.Expr) -> exp.Expr:
+    """(a, b) = (x, y) as a = x AND b = y, <> as an OR of <>s, and (a, b)
+    IN ((x, y), ...) as an OR of those: SQL's own three-valued reading. And
+    an ORDER BY term that is a constant (a subquery of no column of the row)
+    sorts nothing, and goes."""
+    if not isinstance(expression, exp.Select):
+        return expression
+
+    def pairs(left: exp.Tuple, right: exp.Tuple, kind) -> list[exp.Expr] | None:
+        if len(left.expressions) != len(right.expressions):
+            return None
+        return [
+            kind(this=a.copy(), expression=b.copy())
+            for a, b in zip(left.expressions, right.expressions, strict=True)
+        ]
+
+    def rewrite(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, (exp.EQ, exp.NEQ)) and all(
+            isinstance(x, exp.Tuple) for x in (node.this, node.expression)
+        ):
+            parts = pairs(node.this, node.expression, type(node))
+            if parts is None:
+                return node
+            joined = exp.and_(*parts) if isinstance(node, exp.EQ) else exp.or_(*parts)
+            return exp.Paren(this=joined)
+        if (
+            isinstance(node, exp.In)
+            and isinstance(node.this, exp.Tuple)
+            and not node.args.get("query")
+            and node.expressions
+            and all(isinstance(v, exp.Tuple) for v in node.expressions)
+        ):
+            rows = [pairs(node.this, v, exp.EQ) for v in node.expressions]
+            if any(r is None for r in rows):
+                return node
+            return exp.Paren(this=exp.or_(*(exp.and_(*r) for r in rows)))
+        return node
+
+    expression = expression.transform(rewrite)
+    order = expression.args.get("order")
+    if order is not None:
+        # A position (ORDER BY 1) stays; a scalar subquery is one value.
+        kept = [o for o in order.expressions if not isinstance(o.this, exp.Subquery)]
+        if len(kept) != len(order.expressions):
+            expression = expression.copy()
+            expression.set("order", exp.Order(expressions=kept) if kept else None)
+    return expression

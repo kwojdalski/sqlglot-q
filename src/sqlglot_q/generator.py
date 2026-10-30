@@ -121,6 +121,8 @@ TEXT_MAX = f"last {{x iasc {TEXT_KEY} x}}"
 TEXT_PICK = "{$[x;y;z]}'"  # CASE over text: ?[...] cannot pick strings
 TEXT_LENGTH = "{?[0=count each x;0N;count each x]}"
 TEXT_FILL = "{$[0=count x;y;x]}'"  # COALESCE over text
+# Text as a boolean, as SQL reads it.
+TEXT_BOOL = '{any (lower x)~/:("true";"t";"1";"yes";"y";"on")}'
 # TRY_CAST of a column to a number: q's parse ("J"$) of the text, null where
 # it is no number. L is the type's letter.
 TRY_PARSE = '{$[11h=abs t:type x;"L"$string x;0h=t;"L"$x;"L"$string x]}'
@@ -1294,6 +1296,9 @@ class QGenerator(Generator):
         if is_text(node.this) and kind in TYPES and TYPES[kind][0] in PARSE:
             # CAST('5' AS BIGINT) parses the text: q's "J"$"5". `long$ of
             # the symbol `5 is 'type.
+            if TYPES[kind][0] == "boolean":
+                # SQL's true/t/yes/1 (any case); q's "B"$ reads only t and 1.
+                return f"{TEXT_BOOL} {self.chars(node.this.this)}"
             return f'"{PARSE[TYPES[kind][0]]}"${self.chars(node.this.this)}'
         arg = self.operand(node.this)
         if kind in TEXT:
@@ -1994,7 +1999,21 @@ def condition_like(node: exp.Expr) -> bool:
     while isinstance(node, exp.Paren):
         node = node.this
     return isinstance(
-        node, (exp.Predicate, exp.Connector, exp.Not, exp.Boolean, exp.Exists, exp.Escape)
+        node,
+        (
+            exp.Predicate,
+            exp.Connector,
+            exp.Not,
+            exp.Boolean,
+            exp.Exists,
+            exp.Escape,
+            exp.StartsWith,
+            exp.EndsWith,
+            exp.Contains,
+            exp.RegexpLike,
+            exp.LogicalAnd,
+            exp.LogicalOr,
+        ),
     )
 
 
@@ -2075,6 +2094,7 @@ def _select_rewrites():
         q_names,
         quantified_in,
         regex_like,
+        row_values,
         table_star,
         unnest_list,
         window_over_group,
@@ -2086,6 +2106,7 @@ def _select_rewrites():
         [
             unnest_list,
             like_any,
+            row_values,
             named_windows,
             grouping_sets,
             window_over_group,

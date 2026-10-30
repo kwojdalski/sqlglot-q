@@ -258,6 +258,9 @@ becomes `0!select ... by`); the second must not.
 - `REGEXP_REPLACE` is translated for a plain-text pattern only; `STRPTIME`
   for the ISO forms q parses; `TO_TIMESTAMP` (a time zone's type) and `AGE`
   are refused.
+- `(a, b) = (x, y)`, `<>` and `IN ((...), ...)` are read as SQL's standard
+  says, a part's NULL making the row's comparison unknown; DuckDB compares
+  row values as STRUCTs and keeps `(b, NULL) NOT IN ((b, 5))`.
 - `FIRST` and `LAST` (DuckDB's) are q's `first` and `last`: the first and
   last row in the table's order, which SQL only promises for a plain scan.
 - `(a, b) IN (SELECT ...)` compares rows as q tables do, by type: a long

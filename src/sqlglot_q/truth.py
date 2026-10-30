@@ -90,10 +90,15 @@ def holds(gen: QGenerator, node: exp.Expr) -> str:
         return guarded(gen, comparison_guards(node), gen.sql(node))
     if isinstance(node, exp.Not):
         return fails(gen, node.this)
-    if isinstance(node, exp.And):
-        return f"({holds(gen, node.this)})&({holds(gen, node.expression)})"
-    if isinstance(node, exp.Or):
-        return f"({holds(gen, node.this)})|({holds(gen, node.expression)})"
+    if isinstance(node, (exp.And, exp.Or)):
+        glyph = "&" if isinstance(node, exp.And) else "|"
+        from sqlglot_q.generator import condition_like
+
+        if not all(condition_like(x) for x in (node.this, node.expression)):
+            # A boolean column a side: q's and/or, as the reader takes a
+            # column beside them for a condition (f|x reads as GREATEST).
+            glyph = " and " if isinstance(node, exp.And) else " or "
+        return f"({holds(gen, node.this)}){glyph}({holds(gen, node.expression)})"
     if isinstance(node, exp.Is):
         return gen.sql(node)
     if isinstance(node, exp.In):
