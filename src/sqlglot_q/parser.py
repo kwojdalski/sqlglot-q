@@ -427,6 +427,18 @@ class Statement:
                     f"{'inter' if isinstance(found, exp.Intersect) else 'except'} of two "
                     "tables keeps the first's copies; it is read under distinct"
                 )
+        node = node.transform(least_of_min)
+        for agg in node.find_all(exp.AggFunc):
+            inner = agg.this.find(exp.AggFunc) if isinstance(agg.this, exp.Expr) else None
+            if inner is not None and inner.find_ancestor(
+                exp.Select, exp.Window
+            ) is agg.find_ancestor(exp.Select, exp.Window):
+                # max x-min x is max (x-min x), q's right to left: SQL cannot
+                # nest one aggregate in another.
+                self.fail(
+                    "an aggregate of an aggregate has no SQL form: q reads right to left, "
+                    "so max x-min x is max (x-min x); write (max x)-min x"
+                )
         leftover = node.find(*HELPERS) if not isinstance(node, HELPERS) else node
         if leftover is not None:
             self.fail(f"{type(leftover).__name__.lower()} has no SQL form here")
@@ -1962,6 +1974,26 @@ class QMin(exp.Expression):
     """x&y on values: q's min, which does not skip a null."""
 
     arg_types = {"this": True, "expression": True}
+
+
+def least_of_min(node: exp.Expr) -> exp.Expr:
+    """x&y left over: q's min of the two, a null if either is (a null is
+    q's smallest), where LEAST skips one."""
+    if not isinstance(node, QMin):
+        return node
+    a, b = node.this, node.expression
+    conditions = (exp.Predicate, exp.Connector, exp.Not, exp.Boolean, exp.Coalesce, QMin)
+    if any(isinstance(side, conditions) or side.find(*conditions) for side in (a, b)):
+        # size=1 and side=0 is size=(1&side=0): left to be refused, as the
+        # slip it most likely is.
+        return node
+    either = exp.or_(
+        exp.Is(this=a.copy(), expression=exp.Null()), exp.Is(this=b.copy(), expression=exp.Null())
+    )
+    return exp.Case(
+        ifs=[exp.If(this=either, true=exp.Null())],
+        default=exp.Least(this=a.copy(), expressions=[b.copy()]),
+    )
 
 
 class Joins(exp.Expression):

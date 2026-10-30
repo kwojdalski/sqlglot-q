@@ -119,3 +119,35 @@ def test_q_returns_what_duckdb_returns(answers, sql):
 def test_what_q_cannot_match_is_refused(sql):
     with pytest.raises(sqlglot.errors.UnsupportedError):
         sqlglot.transpile(sql, read="duckdb", write="q")
+
+
+# q read back: run in q and, as SQL, in DuckDB, the same rows.
+READ_RUN = [
+    # x&y of values is q's min, a null if either is (LEAST skips one).
+    "select z:n&o from t",
+    "select z:n|o, w:n&o from t",
+    "select z:x&0 from t",
+    "select z:(n&o)+1 from t",
+    "select m:min n&o by g from t",
+]
+
+
+@pytest.mark.parametrize("q", READ_RUN, ids=READ_RUN)
+def test_q_read_back_runs_the_same(q):
+    got = run_q(DATA, [q])[0]
+    assert not isinstance(got, str), got
+    sql = sqlglot.transpile(q, read="q", write="duckdb")[0]
+    assert same(got, run_duckdb(DATA, sql), False), sql
+
+
+REFUSED_READ = [
+    # max (x-min x), q reading right to left: an aggregate in an aggregate.
+    "select a:max x - min x by g from t",
+    "select a:sum n%sum n by g from t",
+]
+
+
+@pytest.mark.parametrize("q", REFUSED_READ, ids=REFUSED_READ)
+def test_q_without_a_sql_form_is_refused(q):
+    with pytest.raises(sqlglot.errors.ParseError):
+        sqlglot.transpile(q, read="q", write="duckdb")
