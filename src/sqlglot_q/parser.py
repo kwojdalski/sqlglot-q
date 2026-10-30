@@ -29,6 +29,7 @@ from sqlglot_q.generator import (
     BOOL_AND,
     BOOL_OR,
     BUCKET,
+    BUCKET_FROM,
     COUNT_ROWS,
     CUME_DIST,
     DOW,
@@ -65,6 +66,7 @@ from sqlglot_q.generator import (
     PARSE,
     PERCENT_RANK,
     QUARTER,
+    RANGE_FRAMES,
     REPLACE,
     REPLACE_FIRST,
     RESERVED,
@@ -831,6 +833,15 @@ class Statement:
             if node is None:
                 self.fail("a lambda with the wrong arguments")
             return node
+        if text == BUCKET_FROM and self.is_("["):
+            self.expect("[")
+            width = self.expr(set())
+            self.expect(";")
+            value = self.expr(set())
+            self.expect(";")
+            origin = self.expr(set())
+            self.expect("]")
+            return exp.DateBin(this=width, expression=value, unit=literal(origin))
         if text == BUCKET and self.is_("["):
             self.expect("[")
             width = self.expr(set())
@@ -1086,6 +1097,17 @@ class Statement:
             n = self.expr(set())
             self.expect("]")
             return QCall(this=arg, fn="nth" if text == NTH else "nthwhole", n=n)
+        if text in RANGE_FRAMES.values():
+            fn = next(k for k, v in RANGE_FRAMES.items() if v == text)
+            self.expect("[")
+            args = [self.expr(set())]
+            while self.is_(";"):
+                self.next()
+                args.append(self.expr(set()))
+            self.expect("]")
+            if len(args) != 3:
+                self.fail("a time frame lambda with the wrong arguments")
+            return QCall(this=args[2], fn=f"rframe_{fn}", n=args[0])
         if text in FRAMES.values():
             fn = next(k for k, v in FRAMES.items() if v == text)
             self.expect("[")

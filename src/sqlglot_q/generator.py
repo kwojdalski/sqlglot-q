@@ -135,6 +135,7 @@ TEXT_BOOL = '{any (lower x)~/:("true";"t";"1";"yes";"y";"on")}'
 TRY_PARSE = '{$[11h=abs t:type x;"L"$string x;0h=t;"L"$x;"L"$string x]}'
 # TIME_BUCKET: x xbar y, but a date (of a width dividing a day) as it is.
 BUCKET = "{$[14h=abs type y;y;x xbar y]}"
+BUCKET_FROM = "{[w;x;o] o+w xbar (`timestamp$x)-o}"
 # String mode, where a column's type is not known: strings (and a string)
 # as symbols, which compare in text order; anything else as it is. And
 # COALESCE of two columns: the text fill for strings, ^ for the rest.
@@ -343,8 +344,22 @@ FRAME_SLICES = (
     "{[a;b;y] n:count y;i:til n;l:$[null a;n#0;0|i+a];h:$[null b;n#n-1;(n-1)&i+b];"
     "AGG each {x y+til 0|1+z-y}[y]'[l;h]}"
 )
+# A RANGE frame of time, w back to the current row: the rows whose order
+# key t is within w before this row's (its peers too), found by bin.
+RANGE_SLICES = "{[w;t;y] s:t binr t-w;h:t bin t;AGG each {x y+til 0|1+z-y}[y]'[s;h]}"
 FRAMES = {
     name: FRAME_SLICES.replace("AGG", agg)
+    for name, agg in (
+        ("sum", "{$[count w:x where not null x;sum w;x 0N]}"),
+        ("avg", "avg"),
+        ("max", f"{{$[count w:x where not {TEXT_NULL} x;last asc w;x 0N]}}"),
+        ("min", f"{{$[count w:x where not {TEXT_NULL} x;first asc w;x 0N]}}"),
+        ("count", "{sum not null x}"),
+        ("count_star", "count"),
+    )
+}
+RANGE_FRAMES = {
+    name: RANGE_SLICES.replace("AGG", agg)
     for name, agg in (
         ("sum", "{$[count w:x where not null x;sum w;x 0N]}"),
         ("avg", "avg"),
@@ -1420,9 +1435,19 @@ class QGenerator(Generator):
     def datebin_sql(self, node: exp.DateBin) -> str:
         from sqlglot_q.temporal import DAY, nanoseconds
 
-        if node.args.get("zone") or len([a for a in node.args.values() if a is not None]) > 2:
-            return self.refuse("TIME_BUCKET with an origin or offset has no q xbar")
+        origin = node.args.get("origin") or node.args.get("unit")  # DuckDB's, in unit
+        if node.args.get("zone"):
+            return self.refuse("TIME_BUCKET with a time zone has no q translation")
         width = node.this
+        if origin is not None and isinstance(origin, (exp.Cast, exp.Literal)):
+            # From an origin: its buckets, origin + w xbar x - origin, of any
+            # fixed width.
+            if not (isinstance(width, exp.Interval) and nanoseconds(width)):
+                return self.refuse("TIME_BUCKET from an origin is translated with a fixed width")
+            args = (self.sql(width), self.sql(node.expression), self.sql(origin))
+            return f"{BUCKET_FROM}[{';'.join(args)}]"
+        if origin is not None:
+            return self.refuse("TIME_BUCKET with an origin or offset has no q xbar")
         ns = nanoseconds(width) if isinstance(width, exp.Interval) else None
         if ns is None or DAY % ns:
             # q counts buckets from 2000.01.01, DuckDB from 2000-01-03: they

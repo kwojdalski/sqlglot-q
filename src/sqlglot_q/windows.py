@@ -118,6 +118,8 @@ def plan(gen: QGenerator, win: exp.Window):
     if needs_order and not terms:
         raise Refused(f"{win.this.sql()} OVER needs an ORDER BY to have a q form")
     frame = frame_of(win.args.get("spec"), bool(terms))
+    if isinstance(frame, tuple) and frame[0] == "range_time" and any(t[1] for t in terms):
+        raise Refused("a RANGE frame of time is translated over an ascending ORDER BY")
     return tuple(parts), tuple(terms) if needs_order else (), value, tie_fix, frame
 
 
@@ -235,6 +237,11 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
         if frame in ("range", "rows"):
             run = "1+til count i" if star else f"sums not null {col}"
             return run, frame == "range", True
+        if isinstance(frame, tuple) and frame[0] == "range_time":
+            from sqlglot_q.generator import RANGE_FRAMES
+
+            word = RANGE_FRAMES["count_star" if star else "count"]
+            return f"{word}[{frame[1]};{time_key(order)};{'i' if star else col}]", False, True
         if isinstance(frame, tuple):
             from sqlglot_q.generator import FRAMES
 
@@ -265,6 +272,11 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
                 type(fn), RUNNING[type(fn)]
             )
             return f"{word} {arg}", frame == "range", True
+        if isinstance(frame, tuple) and frame[0] == "range_time":
+            from sqlglot_q.generator import RANGE_FRAMES
+
+            word = RANGE_FRAMES[WHOLE[type(fn)]]
+            return f"{word}[{frame[1]};{time_key(order)};{arg}]", False, True
         if isinstance(frame, tuple):
             from sqlglot_q.generator import FRAMES
 
@@ -291,6 +303,19 @@ def frame_of(spec: exp.WindowSpec | None, has_order: bool):
         return "whole"
     if end is None and start_side == "PRECEDING":
         end = "CURRENT ROW"  # ROWS UNBOUNDED PRECEDING, ROWS 2 PRECEDING
+    if (
+        kind == "RANGE"
+        and isinstance(start, exp.Interval)
+        and start_side == "PRECEDING"
+        and end == "CURRENT ROW"
+    ):
+        # RANGE BETWEEN INTERVAL w PRECEDING AND CURRENT ROW: a time frame.
+        from sqlglot_q.temporal import timespan
+
+        span = timespan(start)
+        if span is None:
+            raise Refused("a RANGE frame of time is translated for a fixed interval")
+        return ("range_time", span)
     if end != "CURRENT ROW":
         if kind != "ROWS":
             raise Refused("a RANGE frame is translated when it ends at the current row")
@@ -317,3 +342,10 @@ def offset(bound, side: str) -> str:
     if not (isinstance(bound, exp.Literal) and bound.name.isdigit()):
         raise Refused("a window frame is translated with literal bounds")
     return f"-{bound.name}" if side == "PRECEDING" else bound.name
+
+
+def time_key(order: list[str]) -> str:
+    """The one order key a RANGE frame of time measures."""
+    if len(order) != 1:
+        raise Refused("a RANGE frame of time is translated with one ORDER BY key")
+    return order[0]

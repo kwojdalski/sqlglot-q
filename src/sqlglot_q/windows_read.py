@@ -236,6 +236,16 @@ def function(parser, value, order, non_null, QCall):
             )
             return nth, whole, True
         return nth, exp.WindowSpec(**ROWS), True
+    if isinstance(value, QCall) and value.args["fn"].startswith("rframe_"):
+        # A RANGE frame of time, w before the current row's order key.
+        spec = exp.WindowSpec(
+            kind="RANGE", start=value.args["n"], start_side="PRECEDING", end="CURRENT ROW"
+        )
+        name = value.args["fn"][len("rframe_") :]
+        if name == "count_star":
+            return exp.Count(this=exp.Star()), spec, True
+        kinds = {"sum": exp.Sum, "avg": exp.Avg, "max": exp.Max, "min": exp.Min, "count": exp.Count}
+        return kinds[name](this=value.this), spec, True
     if isinstance(value, QCall) and value.args["fn"].startswith("frame_"):
         # A ROWS frame a to b rows off the current one; 0N is unbounded.
         def bound(node, start):

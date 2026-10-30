@@ -28,6 +28,19 @@ TICK_QUERIES = [
     "AS secs FROM trades",
     "SELECT sym, EPOCH(time) AS e, EXTRACT(epoch FROM MAX(time) - MIN(time)) AS s FROM trades "
     "GROUP BY sym, time",
+    # RANGE frames of time: the rows within the interval before each, by bin.
+    "SELECT sym, time, px, AVG(px) OVER (PARTITION BY sym ORDER BY time "
+    "RANGE BETWEEN INTERVAL 10 MINUTE PRECEDING AND CURRENT ROW) AS m FROM trades",
+    "SELECT sym, time, qty, SUM(qty) OVER (ORDER BY time "
+    "RANGE BETWEEN INTERVAL 1 HOUR PRECEDING AND CURRENT ROW) AS s FROM trades",
+    "SELECT sym, time, COUNT(*) OVER (ORDER BY time RANGE BETWEEN INTERVAL '30 minutes' "
+    "PRECEDING AND CURRENT ROW) AS n, MAX(px) OVER (PARTITION BY sym ORDER BY time "
+    "RANGE BETWEEN INTERVAL 1 DAY PRECEDING AND CURRENT ROW) AS hi FROM trades",
+    # TIME_BUCKET from an origin: o + w xbar x - o, of any fixed width.
+    "SELECT sym, TIME_BUCKET(INTERVAL '1 hour', time, TIMESTAMP '2024-01-15 09:30:00') AS b "
+    "FROM trades",
+    "SELECT sym, TIME_BUCKET(INTERVAL '7 minutes', time, TIMESTAMP '2024-01-15 09:00:00') AS b, "
+    "COUNT(*) AS n FROM trades GROUP BY sym, b",
 ]
 
 ONE_WAY: set[str] = set()
