@@ -110,4 +110,5 @@ def test_q_returns_what_duckdb_returns(answers, sql):
     q, got = answers[sql]
     expected = run_duckdb(DATA, sql)
     assert not isinstance(got, str), f"q refused {q}: {got}"
-    assert same(got, expected, "ORDER BY" in sql), f"{q}\nq:      {got}\nduckdb: {expected}"
+    ordered = bool(sqlglot.parse_one(sql, read="duckdb").args.get("order"))
+    assert same(got, expected, ordered), f"{q}\nq:      {got}\nduckdb: {expected}"
