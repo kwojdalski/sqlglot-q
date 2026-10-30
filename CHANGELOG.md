@@ -1,8 +1,36 @@
 # Changelog
 
+## 0.2.1
+
+The first release on PyPI (0.2.0 was tagged but never published), with a
+fifth sweep (`tests/integration/test_sql_sweep5.py`):
+
+Wrong answers, silently:
+
+- `CONCAT`, `||` and `CONCAT_WS` wrote a part with q's `string`: a float
+  `2.0` was `2`, a date `2024.01.31`, a boolean `1`. Each part is now SQL's
+  text of it; a number literal (`CONCAT(s, 2.5)`, which raised `'length`) is
+  one value.
+- `ROUND` of an infinity was `0W`, a long (or 9.2e16 to some digits).
+- A RANGE frame's search read the wrong rows for a null order key.
+- A CTE's or a derived table's column list (`WITH r(a, b)`, `AS r(a, b)`)
+  was dropped: `SELECT *` kept the old names.
+- Reading q: `max x - min x by g` read as `MAX(x - MIN(x))`, which no SQL
+  accepts; it is refused with the parenthesised spelling.
+
+Refused, now translated: any aggregate over a whole partition (`MEDIAN`,
+`STDDEV`, `BOOL_OR`, `STRING_AGG`, `ANY_VALUE`, `ARG_MAX`, `CORR`, `MODE`,
+`FILTER`), `RANGE n PRECEDING` of a number, `FIRST_VALUE`/`LAST_VALUE
+IGNORE NULLS`, `ORDER BY` an unnamed item (`ORDER BY 2`, `ORDER BY
+COUNT(*)`), and `HAVING` without `GROUP BY`. Reading q: `x&y` of values.
+
+`WITH RECURSIVE`, which gave q that failed, is refused, as is a row
+inequality (`(a, b) > (1, 2)`), where DuckDB and the standard differ on a
+NULL.
+
 ## 0.2.0
 
-The first release on PyPI. Everything below 0.1.0's notes is in it, and a
+Tagged, not published. Everything below 0.1.0's notes is in it, and a
 fourth sweep (`tests/integration/test_sql_sweep4.py`, `test_statements.py`,
 `test_string_mode.py`):
 
