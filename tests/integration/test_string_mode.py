@@ -119,6 +119,11 @@ QUERIES = [
     "SELECT a, CONCAT(w, '-', a, 1.5) AS x FROM s",
     "SELECT a, CONCAT_WS('/', w, a, v) AS x FROM s",
     "SELECT a, CONCAT(UPPER(w), a * 1.5) AS x FROM s",
+    # A text comparison as a value, and IS DISTINCT FROM: read back, the
+    # same q (COALESCE(w = 'abc', FALSE) is a condition, not a column).
+    "SELECT a, w = 'abc' OR v = 'r' AS x FROM s",
+    "SELECT a, w FROM s WHERE w IS DISTINCT FROM 'abc'",
+    "SELECT a, FIRST(w ORDER BY a) OVER () AS x FROM s",
 ]
 
 

@@ -202,6 +202,14 @@ def function(parser, value, order, non_null, QCall):
         default = value.args.get("default") or exp.Literal.number(0)
         kind = exp.Lead if value.args["fn"] == "leadd" else exp.Lag
         return kind(this=value.this, offset=n, default=default), None, True
+    if (
+        isinstance(value, QCall)
+        and value.args["fn"] in ("first", "last")
+        and isinstance(value.this, exp.Order)
+    ):
+        # first x in y's order: FIRST(x ORDER BY y), over the partition.
+        kind = exp.First if value.args["fn"] == "first" else exp.Last
+        return kind(this=value.this), None, False
     if isinstance(value, QCall) and value.args["fn"] == "first":
         # With no sort ahead, the table's first row: FIRST_VALUE OVER ().
         return exp.FirstValue(this=value.this), None, order is not None

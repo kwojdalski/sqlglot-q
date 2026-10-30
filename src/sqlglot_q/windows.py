@@ -177,6 +177,11 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
             word = FIRST_KNOWN_RUN if first else LAST_KNOWN_RUN
             return f"{word} {arg}", frame == "range", True
         raise Refused("IGNORE NULLS is translated over the partition or to the current row")
+    if isinstance(fn, (exp.First, exp.Last)) and isinstance(fn.this, exp.Order):
+        # FIRST(x ORDER BY y) OVER (...): its own order, over the partition.
+        if frame != "whole":
+            raise Refused("FIRST/LAST with ORDER BY is translated over the whole partition")
+        return gen.sql(fn), False, False
     if isinstance(fn, (exp.First, exp.Last)) and not fn.args.get("expression"):
         # DuckDB's FIRST(x) OVER (...) is FIRST_VALUE, LAST(x) LAST_VALUE.
         kind = exp.FirstValue if isinstance(fn, exp.First) else exp.LastValue

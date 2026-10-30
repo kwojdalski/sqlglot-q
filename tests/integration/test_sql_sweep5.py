@@ -87,6 +87,9 @@ QUERIES = [
     # TIME_BUCKET of months: q's months count from 2000.01, DuckDB's origin.
     "SELECT g, d, TIME_BUCKET(INTERVAL '2 months', d) AS b FROM t",
     "SELECT g, TIME_BUCKET(INTERVAL '1 year 6 months', d) AS b, COUNT(*) AS c FROM t GROUP BY g, b",
+    # FIRST/LAST with ORDER BY over a whole partition.
+    "SELECT g, n, FIRST(n ORDER BY x) OVER (PARTITION BY g) AS f FROM t",
+    "SELECT g, n, LAST(s ORDER BY o DESC) OVER () AS f FROM t",
 ]
 
 REFUSED = [

@@ -729,19 +729,19 @@ class QGenerator(Generator):
                 if is_text(left):
                     left, right = right, left
                 match = f"{self.operand(left)}~\\:{self.sql(right)}"
-                return match if isinstance(node, exp.EQ) else f"not {match}"
+                return match if isinstance(node, exp.EQ) else f"not ({match})"
             if isinstance(left, exp.Subquery):
                 left, right = right, left
             if isinstance(right, exp.Subquery):
                 # One value, a string or not: matched against each row.
                 match = f"{self.operand(left)}~\\:{self.operand(right)}"
-                return match if isinstance(node, exp.EQ) else f"not {match}"
+                return match if isinstance(node, exp.EQ) else f"not ({match})"
             if atomic_value(left) or atomic_value(right):
                 # A number, a date: no string, q's = (~' would pair it per row).
                 return f"{self.operand(left)}{glyph}{self.operand(right)}"
             # Two columns, of text or not: match row by row.
             match = f"{self.operand(left)}~'{self.operand(right)}"
-            return match if isinstance(node, exp.EQ) else f"not {match}"
+            return match if isinstance(node, exp.EQ) else f"not ({match})"
         if not self.symbols and (is_text(left) or is_text(right)):
             # < and > on strings compare character by character; as symbols
             # they compare in the text's order.
@@ -2202,6 +2202,13 @@ def condition_like(node: exp.Expr) -> bool:
     """A comparison, a test or a connective of them: true or false as it reads."""
     while isinstance(node, exp.Paren):
         node = node.this
+    if (
+        isinstance(node, exp.Coalesce)
+        and len(node.expressions) == 1
+        and isinstance(node.expressions[0], exp.Boolean)
+    ):
+        # COALESCE(a = b, FALSE): a condition with its unknown decided.
+        return condition_like(node.this)
     return isinstance(
         node,
         (
