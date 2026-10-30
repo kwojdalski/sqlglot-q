@@ -154,6 +154,8 @@ KEYWORD_DYADS = {
     "xbar",
     "xexp",
     "xlog",
+    "div",
+    "fby",
     "cor",
     "cov",
     "scov",
@@ -364,6 +366,13 @@ class Statement:
             self.fail(f"unexpected {self.peek().text!r}")
         if isinstance(node, TableLiteral):
             node = no_from(self, node)
+        if isinstance(node, Sorted) and isinstance(node.this, exp.Column):
+            # `c xasc t on its own: t's rows in that order.
+            order = node.args["order"]
+            node = exp.Select(expressions=[exp.Star()]).from_(
+                table(self, node.this.name), copy=False
+            )
+            node.set("order", order)
         if isinstance(node, Exec):
             # exec c from t, on its own: the values of the one column, which
             # SQL returns as the rows of SELECT c.
@@ -1037,6 +1046,14 @@ class Statement:
             self.fail("an empty list has no SQL form")
         if self.is_("[") and self.is_("]", 1):
             return self.table_literal()
+        tok = self.peek()
+        if tok and tok.kind == "name" and tok.text in FBY_AGGREGATES and self.is_(";", 1):
+            # (max;qty) fby sym: the aggregate of qty per sym, on each row.
+            self.next()
+            self.next()
+            arg = self.expr(set())
+            self.expect(")")
+            return FbyPair(this=arg, fn=tok.text)
         items = [self.expr(set())]
         while self.is_(";"):
             self.next()
@@ -1238,6 +1255,17 @@ class Statement:
             return exp.Mul(
                 this=exp.Floor(this=exp.Div(this=right, expression=left)), expression=left
             )
+        if op == "fby" and isinstance(left, FbyPair):
+            # (max;qty) fby sym: MAX(qty) OVER (PARTITION BY sym).
+            keys = right.args["items"] if isinstance(right, Rows) else [right]
+            if not all(isinstance(k, exp.Column) for k in keys):
+                self.fail("fby is read grouped by columns")
+            kind = FBY_AGGREGATES[left.args["fn"]]
+            value = exp.Count(this=exp.Star()) if kind is exp.Count else kind(this=left.this)
+            return exp.Window(this=value, partition_by=list(keys), over="OVER")
+        if op == "div":
+            # x div y floors: FLOOR(x / y).
+            return exp.Floor(this=exp.Div(this=left, expression=right))
         if op == "mod":
             # q's mod floors (-7 mod 3 is 2); SQL's % takes the dividend's
             # sign (-1). ((x % y) + y) % y is the floor modulo in SQL.
@@ -1261,6 +1289,8 @@ class Statement:
                 return exp.In(this=left, query=exp.Subquery(this=right.this))
             if isinstance(right, Enlisted):
                 right = Rows(items=[right.this])
+            if isinstance(right, (exp.Literal, Chars)):
+                right = Rows(items=[right])  # sym in `a: a list of one
             if not isinstance(right, Rows) or not all(
                 isinstance(i, (exp.Literal, exp.Null, exp.Boolean, exp.Neg, Chars))
                 for i in right.args["items"]
@@ -1338,12 +1368,18 @@ class Statement:
             return self.update(stop)
         if word == "delete":
             return self.delete(stop)
-        limit = None
+        limit = offset = None
         if word == "select" and self.is_("["):
             # select[n]: the first n rows, SQL's LIMIT n.
             self.next()
             limit = self.expr(set())
             self.expect("]")
+            offset = None
+            if isinstance(limit, Rows) and len(limit.args["items"]) == 2:
+                # select[m n]: n rows from the m-th, LIMIT n OFFSET m.
+                offset, limit = limit.args["items"]
+                if not (isinstance(offset, exp.Literal) and offset.this.isdigit()):
+                    self.fail("select[m n] is read with counts m, n >= 0")
             if not (isinstance(limit, exp.Literal) and limit.this.isdigit()):
                 self.fail("select[n] is read with a count n >= 0; select[-n] takes the last rows")
         distinct = False
@@ -1361,12 +1397,26 @@ class Statement:
         if self.is_("where"):
             self.next()
             where = self.conditions(stop)
+        qualify = None
+        if where is not None and where.find(exp.Window):
+            # fby in a where: a window, which SQL filters on in QUALIFY,
+            # after WHERE; so only when the fby constraints come last.
+            parts = list(where.flatten()) if isinstance(where, exp.And) else [where]
+            first = next(i for i, p in enumerate(parts) if p.find(exp.Window))
+            if not all(p.find(exp.Window) for p in parts[first:]):
+                self.fail("fby is read when its constraints come after the others")
+            qualify = conjunction(parts[first:])
+            where = conjunction(parts[:first]) if first else None
         if where is not None:
             where = scalar_aggregates(self, where, source)
         if word == "select":
             # first x and last x of a select: the first and last row's value,
             # nulls and all, as DuckDB's FIRST and LAST in a table's order.
             cols = [first_last(c) for c in cols]
+        if word == "select" and not keys and isinstance(source, Sorted):
+            cols = sorted_windows(self, cols, source.args["order"])
+        if word == "select" and not keys:
+            cols = whole_table_windows(cols)
         if keys:
             cols = [per_group(c, keys) for c in cols]
         elif word == "select":
@@ -1380,7 +1430,11 @@ class Statement:
                 for c in cols
             ]
         node = select(self, cols, keys, source, where, distinct)
-        if limit is not None:
+        if qualify is not None:
+            node.set("qualify", exp.Qualify(this=qualify))
+        if limit is not None and offset is not None:
+            node = with_modifier(node, limit=limit, offset=offset)
+        elif limit is not None:
             node = with_modifier(node, limit=limit)
         if word == "exec":
             if keys or len(cols) != 1:
@@ -1605,6 +1659,21 @@ class Chars(exp.Expression):
     """A q string literal, kept apart from symbols until its use is known."""
 
     arg_types = {"this": True}
+
+
+FBY_AGGREGATES = {
+    "max": exp.Max,
+    "min": exp.Min,
+    "sum": exp.Sum,
+    "avg": exp.Avg,
+    "count": exp.Count,
+}
+
+
+class FbyPair(exp.Expression):
+    """(agg;x), fby's left side."""
+
+    arg_types = {"this": True, "fn": True}
 
 
 class TableLiteral(exp.Expression):
@@ -1878,6 +1947,54 @@ def qualify_dropped(node: exp.Select) -> None:
             col.set("table", exp.to_identifier(owner[col.name]))
 
 
+def sorted_windows(parser, cols: list[exp.Expr], order: exp.Order) -> list[exp.Expr]:
+    """select c:sums x from `o xasc t: q's running functions over the sorted
+    rows, windows ordered as the sort (sums is ROWS UNBOUNDED PRECEDING)."""
+    from sqlglot_q.windows_read import function
+
+    def convert(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, QCall):
+            found = function(parser, node, order, non_null, QCall)
+            if found is not None:
+                fn, spec, ordered = found
+                win = exp.Window(this=fn, spec=spec, over="OVER")
+                if ordered:
+                    win.set("order", order.copy())
+                return win
+        return node
+
+    return [c.transform(convert) for c in cols]
+
+
+def whole_table_windows(cols: list[exp.Expr]) -> list[exp.Expr]:
+    """select x:qty%sum qty from t: beside a column of the rows, an aggregate
+    is the whole table's, on every row: SQL's aggregate OVER ()."""
+
+    inside = (exp.AggFunc, exp.Filter, exp.Subquery, exp.Select, exp.Window)
+
+    def rowwise(node: exp.Expr) -> bool:
+        return any(c.find_ancestor(*inside) is None for c in node.find_all(exp.Column))
+
+    def aggregates(node: exp.Expr) -> bool:
+        return any(
+            a.find_ancestor(exp.Subquery, exp.Select) is None for a in node.find_all(exp.AggFunc)
+        )
+
+    if not any(rowwise(c) for c in cols) or not any(aggregates(c) for c in cols):
+        return cols
+
+    def over(node: exp.Expr) -> exp.Expr:
+        if isinstance(node, exp.Filter) or (
+            isinstance(node, exp.AggFunc)
+            and not isinstance(node.parent, (exp.Window, exp.Filter))
+            and node.find_ancestor(exp.Subquery, exp.Select) is None
+        ):
+            return exp.Window(this=node.copy(), over="OVER")
+        return node
+
+    return [c.transform(over) for c in cols]
+
+
 def first_last(item: exp.Expr) -> exp.Expr:
     def swap(node: exp.Expr) -> exp.Expr:
         if (
@@ -1965,6 +2082,17 @@ def with_modifier(target: exp.Expr, **mods) -> exp.Expr:
 
 
 def limited(parser: Statement, count: exp.Expr, target: exp.Expr) -> exp.Expr:
+    if isinstance(bare(target), exp.Column):
+        # 5 sublist t: t's first rows.
+        target = exp.Select(expressions=[exp.Star()]).from_(
+            table(parser, bare(target).name), copy=False
+        )
+    if isinstance(bare(target), Sorted) and isinstance(bare(target).this, exp.Column):
+        sorted_ = bare(target)
+        target = exp.Select(expressions=[exp.Star()]).from_(
+            table(parser, sorted_.this.name), copy=False
+        )
+        target.set("order", sorted_.args["order"])
     if not is_query(target):
         parser.fail("sublist is read on a query")
     if isinstance(count, Rows) and len(count.args["items"]) == 2:

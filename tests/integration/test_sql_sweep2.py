@@ -110,3 +110,38 @@ def test_q_returns_what_duckdb_returns(answers, sql):
     assert not isinstance(got, str), f"q refused {q}: {got}"
     ordered = bool(sqlglot.parse_one(sql, read="duckdb").args.get("order"))
     assert same(got, expected, ordered), f"{q}\nq:      {got}\nduckdb: {expected}"
+
+
+# Hand-written q, read: run in q, and as the SQL it reads as in DuckDB.
+from tests.integration.test_temporal import TICKS  # noqa: E402
+
+READ_RUN = [
+    # sym in `a: a list of one.
+    "select from trades where sym in `a",
+    # An aggregate beside the rows' columns is the whole table's: OVER ().
+    "select sym, x:qty%sum qty from trades",
+    "select sym, px, z:(px-avg px)%dev px from trades",
+    # div floors.
+    "select sym, d:qty div 7 from trades",
+    # select[m n], a sort and sublist of a table on their own.
+    "select[1 2] from trades",
+    "`sym`px xdesc trades",
+    "3 sublist `px xdesc trades",
+    "(1;2) sublist trades",
+    # fby: a window, filtered in QUALIFY after the where's other constraints.
+    "select from trades where qty=(max;qty) fby sym",
+    "select from trades where px>1.5, qty=(min;qty) fby sym",
+    # Running functions in a select over a sorted table.
+    "select sym, qty, cumq:sums qty from `time xasc trades",
+    "select sym, px, chg:px-prev px from `time xasc trades",
+    "select sym, mx:maxs px from `time xasc trades",
+]
+
+
+@pytest.mark.parametrize("q", READ_RUN, ids=READ_RUN)
+def test_q_read_back_runs_the_same(q):
+    got = run_q(TICKS, [q])[0]
+    assert not isinstance(got, str), got
+    sql = sqlglot.transpile(q, read="q", write="duckdb")[0]
+    ordered = "xdesc" in q or "xasc" in q
+    assert same(got, run_duckdb(TICKS, sql), ordered and "sublist" not in q), sql
