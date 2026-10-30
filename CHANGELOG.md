@@ -1,8 +1,29 @@
 # Changelog
 
+## 0.2.2
+
+The rest of the fifth sweep (`tests/integration/test_sql_sweep5.py`,
+`test_statements.py`, `test_string_mode.py`):
+
+Wrong answers, and q that failed:
+
+- `INSERT ... VALUES` of another type than the column (1.9 into a BIGINT,
+  1 into a DOUBLE) raised 'type: the values are cast to the columns' types,
+  as SQL's INSERT casts them.
+- A constant beside aggregates (`SELECT 1 AS a, MAX(n)`) was 'rank.
+- `LAG`/`LEAD` with a column as the default was 'length.
+- String mode: two round trips that did not settle (a text comparison as a
+  value, `<>` on text).
+
+Refused, now translated: `FIRST`/`LAST(x ORDER BY y)`, also over a whole
+partition; `TIME_BUCKET` of months and years; `EPOCH_MS` both ways (a count
+to a timestamp, a timestamp to its count) and `MAKE_TIMESTAMP(micros)`;
+`ALTER COLUMN ... TYPE`. `TO_TIMESTAMP(seconds)`, a TIMESTAMP WITH TIME
+ZONE, is refused.
+
 ## 0.2.1
 
-The first release on PyPI (0.2.0 was tagged but never published), with a
+Tagged, not published (0.2.0 neither), with a
 fifth sweep (`tests/integration/test_sql_sweep5.py`):
 
 Wrong answers, silently:
