@@ -44,6 +44,8 @@ QUERIES = [
     "SELECT g FROM a INTERSECT SELECT g FROM b",
     "WITH a AS (SELECT g, n, RANK() OVER (PARTITION BY g ORDER BY n DESC) AS r FROM t) "
     "SELECT g, n FROM a WHERE r = 1 UNION ALL SELECT g, v FROM u",
+    # (a, b) IN (SELECT ...) of a long against a float: compared as numbers.
+    "SELECT g, n FROM t WHERE (g, o) IN (SELECT g, v / 10 FROM u)",
 ]
 
 # On the calendar table, which has a boolean column f.

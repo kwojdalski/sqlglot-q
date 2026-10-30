@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+A third sweep of 50 problems (`tests/integration/test_sql_sweep3.py`,
+`test_statements.py`, `test_string_mode.py`, `tests/test_cli.py`).
+
+Wrong answers, silently:
+
+- `x // y` of a float truncated it; DuckDB's `//` of a float divides.
+- String mode: `UPDATE s SET w = 'up' WHERE ...` spread the string's
+  characters over the rows.
+- Symbol mode: a literal with leading or trailing spaces lost them (`` `$ ``
+  trims), so `s = ' x'` found `x`: refused.
+- Reading q: `t lj `k xkey q` (and `n!q`) as a LEFT JOIN gave every match
+  where `lj` takes the first: refused unless `q` is a grouping by `k`.
+
+q errors, and round trips that did not settle: `FETCH FIRST n ROWS`; a window
+in a `CASE`; `WITH` over a set operation, an `INSERT`, `UPDATE` or `DELETE`;
+a join of an unnamed query; `WHERE f OR c` of a boolean column; a constant
+`ORDER BY` term; `CAST('true' AS BOOLEAN)`; `LEVENSHTEIN` of NULL; row values
+of a long and a float. String mode: a NULL into a text column, `SET w =
+NULL`, text into an added column, a `CASE` of a text column with no `ELSE`,
+`LAG`/`LEAD` text defaults, `= 1` (`~'`), `ANY_VALUE`, a scalar subquery's
+text.
+
+Now translated: `(a, b) = / <> / IN ((...), ...)`, `UNION ALL BY NAME` (q's
+`uj`), `TRY_CAST` to dates, timestamps and times, `ISFINITE`, `ROUND_EVEN`,
+`SIGNBIT`, `WEEKOFYEAR`, `EPOCH_US`/`EPOCH_NS`, `MAKE_TIME`, `PREFIX`/
+`SUFFIX`, `UNICODE`, `LEVENSHTEIN`, `BIT_LENGTH`, `STRING_SPLIT`,
+`TRUNC(x, d)`.
+
+Reading q: `lj`/`ij` with a keyed grouping, `uj`, `aj[...]`/`ej[...]` on
+their own, a parenthesised join, `"D"$x` (and `"J"$`, `"P"$`) as `TRY_CAST`,
+`count each string x`, and functional selects, `?[t;c;b;a]`.
+
+The command reads q too: `sqlglot-q --from-q [--write dialect]`, and runs as
+`python -m sqlglot_q`.
+
 A second sweep of 101 problems, each with its case in
 `tests/integration/test_sql_sweep2.py`, `test_statements.py` (statements run
 in q and DuckDB, the table they leave compared), the string-mode and

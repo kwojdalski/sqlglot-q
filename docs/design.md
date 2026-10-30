@@ -263,8 +263,10 @@ becomes `0!select ... by`); the second must not.
   row values as STRUCTs and keeps `(b, NULL) NOT IN ((b, 5))`.
 - `FIRST` and `LAST` (DuckDB's) are q's `first` and `last`: the first and
   last row in the table's order, which SQL only promises for a plain scan.
-- `(a, b) IN (SELECT ...)` compares rows as q tables do, by type: a long
-  part against a float column raises `'type`. `ts - d` (a timestamp less a
-  date) raises `'type` too; the writer does not know the types.
+- `ts - d` (a timestamp less a date) raises `'type`; the writer does not
+  know the types.
+- A `STRING_SPLIT` of NULL is an empty list in q, which has no NULL list.
+- Unquoted SQL names are case-insensitive, and q's are not: `SELECT N FROM T`
+  reads q's `N` of `T`, as q tables are often named in mixed case.
 - `CURRENT_DATE` and `CURRENT_TIMESTAMP` are the q process's local clock
   (`.z.D`, `.z.P`), not the SQL session's time zone.

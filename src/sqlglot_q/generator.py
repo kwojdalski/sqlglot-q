@@ -302,8 +302,9 @@ IN_ANY = (
 # (a, b) IN (SELECT ...): the rows as a table, in the subquery's rows that
 # have no null; a row with a null part matches nothing, as in SQL.
 TUPLE_IN = (
-    '{n:{$[0h=type x;0=count each x;null x]};k:`$"x",\'string til count x;r:k xcol y;'
-    "r:r where not max value n each flip r;(not max n each x)&(flip k!x) in r}"
+    "{n:{$[0h=type x;0=count each x;null x]};f:{$[(abs type x) in 5 6 7 8 9h;`float$x;x]};"
+    'k:`$"x",\'string til count x;r:k xcol y;r:r where not max value n each flip r;'
+    "(not max n each x)&(flip k!f each x) in flip f each flip r}"
 )
 # x LIKE y with y a pattern per row: each made q's (% *, _ ?, q's own
 # wildcards bracketed) and matched row by row.
