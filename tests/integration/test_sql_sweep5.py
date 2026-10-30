@@ -95,6 +95,11 @@ QUERIES = [
     "SELECT 'z', COUNT(*) FROM t",
     "SELECT 1 AS a, MAX(n) AS m FROM t",
     "SELECT 'z' AS g, MIN(o) AS m, 2.5 AS h, DATE '2024-01-02' AS d FROM t WHERE n > 0",
+    # LAG/LEAD with a column as the default: its value on the edge rows.
+    "SELECT g, n, LAG(n, 1, n) OVER (ORDER BY o, g) AS l FROM t",
+    "SELECT g, n, LEAD(n, 2, o) OVER (PARTITION BY g ORDER BY o) AS l FROM t",
+    "SELECT g, s, LAG(s, 1, g) OVER (ORDER BY o, g) AS l FROM t",
+    "SELECT g, x, LEAD(x, 1, n) OVER (ORDER BY o, g) AS l FROM t",
 ]
 
 REFUSED = [

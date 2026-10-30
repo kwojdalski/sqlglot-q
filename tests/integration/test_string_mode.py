@@ -124,6 +124,7 @@ QUERIES = [
     "SELECT a, w = 'abc' OR v = 'r' AS x FROM s",
     "SELECT a, w FROM s WHERE w IS DISTINCT FROM 'abc'",
     "SELECT a, FIRST(w ORDER BY a) OVER () AS x FROM s",
+    "SELECT a, w, LAG(w, 1, v) OVER (ORDER BY a) AS x FROM s",
 ]
 
 

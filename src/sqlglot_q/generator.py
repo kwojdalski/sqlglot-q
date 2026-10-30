@@ -243,13 +243,10 @@ SIGN = "{?[null x;0Ni;signum x]}"
 # LAG/LEAD with a default: the default only past the partition's edge, in the
 # column's type (q refuses an amend of another type).
 # (A column of strings has no type to cast the default to: it goes in as is.)
-LAG_DEFAULT = (
-    "{v:y xprev x;w:til y&count x;@[v;w;:;$[0h=type v;(count w)#enlist z;(abs type v)$z]]}"
-)
-LEAD_DEFAULT = (
-    "{v:neg[y] xprev x;w:(count x)-1+til y&count x;"
-    "@[v;w;:;$[0h=type v;(count w)#enlist z;(abs type v)$z]]}"
-)
+# A default that is a column (LAG(n, 1, n)) is its value on those rows.
+_EDGE = "@[v;w;:;$[0h=type v;$[0h=type z;z w;(count w)#enlist z];(abs type v)$$[0>type z;z;z w]]]}"
+LAG_DEFAULT = "{v:y xprev x;w:til y&count x;" + _EDGE
+LEAD_DEFAULT = "{v:neg[y] xprev x;w:(count x)-1+til y&count x;" + _EDGE
 # Window functions with no q word, applied to a stage's rows (windows.py).
 # NTILE as SQL defines it: the first n mod k buckets get the extra rows.
 NTILE = "{n:count y;s:n div x;r:n mod x;j:til n;1+?[j<r*s+1;j div s+1;r+(j-r*s+1) div s]}"
