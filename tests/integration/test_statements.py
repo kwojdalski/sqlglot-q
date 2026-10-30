@@ -40,6 +40,15 @@ CASES = [
         "SELECT g, v, z FROM u",
     ),
     ("ALTER TABLE u RENAME COLUMN v TO w", "SELECT g, w FROM u"),
+    # ADD COLUMN ... DEFAULT: the default on every row, of the column's type.
+    ("ALTER TABLE u ADD COLUMN z INTEGER DEFAULT 7", "SELECT g, z FROM u"),
+    ("ALTER TABLE u ADD COLUMN z DOUBLE DEFAULT 1", "SELECT g, z FROM u"),
+    ("ALTER TABLE u ADD COLUMN z VARCHAR DEFAULT 'hi'", "SELECT g, z FROM u"),
+    ("ALTER TABLE u ADD COLUMN z DATE DEFAULT DATE '2024-01-02'", "SELECT g, z FROM u"),
+    (
+        "ALTER TABLE u ADD COLUMN z BIGINT DEFAULT -3; UPDATE u SET z = z + v",
+        "SELECT g, z FROM u",
+    ),
     ("ALTER TABLE t DROP COLUMN s", "SELECT * FROM t"),
     ("ALTER TABLE u RENAME TO uu", "SELECT g, v FROM uu"),
     # IF NOT EXISTS keeps an existing table; a view is q's view.
@@ -113,6 +122,11 @@ STRING_CASES = [
         "SELECT a, z FROM s",
     ),
     ("DELETE FROM s WHERE w IS NULL", "SELECT a, w FROM s"),
+    ("ALTER TABLE s ADD COLUMN z VARCHAR DEFAULT 'hi'", "SELECT a, z FROM s"),
+    (
+        "ALTER TABLE s ADD COLUMN z VARCHAR DEFAULT 'h'; UPDATE s SET z = w WHERE a > 3",
+        "SELECT a, z FROM s",
+    ),
 ]
 
 
@@ -139,6 +153,8 @@ REFUSED = [
     # q's insert, update and delete give back no rows.
     "INSERT INTO u VALUES ('e', 50) RETURNING g",
     "UPDATE u SET v = 1 RETURNING v",
+    # q has no column defaults: an insert of the other columns has none to use.
+    "CREATE TABLE w (a INTEGER DEFAULT 1, b INTEGER)",
 ]
 
 

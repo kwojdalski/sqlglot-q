@@ -519,6 +519,13 @@ def dyad(word: str):
     return handler
 
 
+def column_default(col: exp.ColumnDef) -> exp.Expr | None:
+    for c in col.args.get("constraints") or []:
+        if isinstance(c.args.get("kind"), exp.DefaultColumnConstraint):
+            return c.args["kind"].this
+    return None
+
+
 class QGenerator(Generator):
     """A sqlglot generator whose output is q.
 
@@ -1803,8 +1810,19 @@ class QGenerator(Generator):
         name = self.table_sql(node.this)
         action = node.args["actions"][0]
         if isinstance(action, exp.ColumnDef):
-            # ADD COLUMN c T: c of T's null on every row.
+            # ADD COLUMN c T: c of T's null on every row, or its DEFAULT.
             kind = action.args.get("kind")
+            default = column_default(action)
+            if default is not None and not isinstance(default, exp.Null):
+                if kind is None or (kind.this not in TYPES and kind.this not in TEXT):
+                    return self.refuse("ALTER TABLE ADD COLUMN needs a type q has")
+                if kind.this in TEXT and isinstance(default, exp.Literal) and default.is_string:
+                    value = self.sql(default)
+                else:
+                    value = self.sql(exp.Cast(this=default.copy(), to=kind.copy()))
+                if kind.this in TEXT and not self.symbols:
+                    value = f"(count i)#enlist {value}"  # one string a row
+                return f"update {self.name(action.name)}:{value} from `{name}"
             if kind is not None and kind.this in TEXT:
                 empty = "`" if self.symbols else '(count i)#enlist ""'
                 return f"update {self.name(action.name)}:{empty} from `{name}"
@@ -1862,6 +1880,9 @@ class QGenerator(Generator):
                 continue
             if not isinstance(col, exp.ColumnDef):
                 return self.refuse(f"{col.sql()} in CREATE TABLE has no q form")
+            if column_default(col) is not None:
+                # q's insert of the other columns has nothing to fill it with.
+                return self.refuse("a column DEFAULT in CREATE TABLE has no q form")
             if any(
                 isinstance(c.args.get("kind"), exp.PrimaryKeyColumnConstraint)
                 for c in col.args.get("constraints") or []
