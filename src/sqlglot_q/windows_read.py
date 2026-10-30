@@ -183,6 +183,10 @@ def function(parser, value, order, non_null, QCall):
 
     if isinstance(value, AGGREGATE):
         return value, None, False
+    inner = value.this if isinstance(value, exp.Filter) else value
+    if isinstance(inner, exp.AggFunc) and not value.find(exp.Window, QCall):
+        # Any other aggregate under by: its value over the whole partition.
+        return value, None, False
     if (
         isinstance(value, exp.Add)
         and isinstance(value.this, exp.Literal)

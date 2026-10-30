@@ -288,7 +288,18 @@ def function(gen: QGenerator, win: exp.Window, order: list[str], has_order: bool
         if word in MOVING_NULLS:
             return f"{MOVING_NULLS[word]}[{frame};{arg}]", False, True
         return f"{frame} {word} {arg}", False, True
+    if frame == "whole" and is_aggregate(fn):
+        # Over the whole partition, any aggregate is its grouped value,
+        # which update ... by spreads over the partition's rows.
+        return gen.sql(fn), False, False
     raise Refused(f"{type(fn).__name__} OVER has no q translation")
+
+
+def is_aggregate(fn: exp.Expr) -> bool:
+    """An aggregate, under any FILTER or IGNORE NULLS of its own."""
+    while isinstance(fn, (exp.Filter, exp.IgnoreNulls, exp.RespectNulls)):
+        fn = fn.this
+    return isinstance(fn, exp.AggFunc) and not fn.find(exp.Window)
 
 
 def frame_of(spec: exp.WindowSpec | None, has_order: bool):

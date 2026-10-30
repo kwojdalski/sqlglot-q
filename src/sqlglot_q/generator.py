@@ -97,8 +97,9 @@ ANONYMOUS = {
 
 # Spelled as lambdas because q has no word for them; parser.py reads these
 # exact texts back.
-ROUND = "{signum[x]*floor 0.5+abs x}"  # half away from zero, as SQL
-ROUND_TO = "{(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y}"
+# Half away from zero, as SQL; an infinity is itself (floor 0w is 0W, a long).
+ROUND = '{r:signum[x]*floor 0.5+abs x;$[(abs type x) in 8 9h;?[0w=abs x;x;"f"$r];r]}'
+ROUND_TO = '{r:(signum x)*(floor 0.5+abs[x]*10 xexp y)%10 xexp y;?[0w=abs x;"f"$x;r]}'
 # x // y: toward zero for integers (q's div floors), and DuckDB's // of a
 # float is its plain division.
 INT_DIV = "{$[any 8 9h in abs type each (x;y);x%y;signum[x*y]*div[abs x;abs y]]}"

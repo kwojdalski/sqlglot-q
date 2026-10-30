@@ -47,6 +47,9 @@ from tests.integration.test_sql_sweep3 import QUERIES as SWEEP3
 from tests.integration.test_sql_sweep4 import ONE_WAY as ONE_WAY4
 from tests.integration.test_sql_sweep4 import QUERIES as SWEEP4
 from tests.integration.test_sql_sweep4 import TICK_QUERIES as SWEEP4_TICKS
+from tests.integration.test_sql_sweep5 import ONE_WAY as ONE_WAY5
+from tests.integration.test_sql_sweep5 import QUERIES as SWEEP5
+from tests.integration.test_sql_sweep5 import TICK_QUERIES as SWEEP5_TICKS
 from tests.integration.test_sqlglot_native import DATA as NATIVE_DATA
 from tests.integration.test_sqlglot_native import QUERIES as NATIVE
 from tests.integration.test_sqlglot_native import SCRIPTS
@@ -99,6 +102,7 @@ SQL = (
     + [q for q in SWEEP2 if q not in ONE_WAY]
     + [q for q in SWEEP3 + SWEEP3_CALENDAR if q not in ONE_WAY3]
     + [q for q in SWEEP4 + SWEEP4_TICKS if q not in ONE_WAY4]
+    + [q for q in SWEEP5 + SWEEP5_TICKS if q not in ONE_WAY5]
 )
 from tests.integration.test_reading import QUERIES as READING  # noqa: E402
 
@@ -129,6 +133,7 @@ SELECTS += [(sql, False) for sql in SWEEP]
 SELECTS += [(sql, False) for sql in SWEEP2 if sql not in ONE_WAY]
 SELECTS += [(sql, False) for sql in SWEEP3 + SWEEP3_CALENDAR if sql not in ONE_WAY3]
 SELECTS += [(sql, False) for sql in SWEEP4 + SWEEP4_TICKS if sql not in ONE_WAY4]
+SELECTS += [(sql, False) for sql in SWEEP5 + SWEEP5_TICKS if sql not in ONE_WAY5]
 
 
 @pytest.mark.parametrize(("sql", "ordered"), SELECTS, ids=[s for s, _ in SELECTS])
@@ -150,7 +155,12 @@ def test_sql_read_back_from_q_means_the_same(sql, ordered):
         else CALENDAR_DATA
         if sql in CALENDAR or sql in SWEEP3_CALENDAR
         else MORE_DATA
-        if sql in MORE or sql in SWEEP or sql in SWEEP2 or sql in SWEEP3 or sql in SWEEP4
+        if sql in MORE
+        or sql in SWEEP
+        or sql in SWEEP2
+        or sql in SWEEP3
+        or sql in SWEEP4
+        or sql in SWEEP5
         else TABLES
     )
     assert same(run_duckdb(tables, back), run_duckdb(tables, sql), ordered), back
